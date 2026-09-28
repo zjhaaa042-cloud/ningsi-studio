@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ningsi-studio"
+version = "0.1.0"
+description = "凝思 Studio —— A09 便携脑电专注力训练与心理状态评估的 Web 应用（前端 + 后端 + 数据保存）"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+# pylsl 放进必需依赖：本项目的核心能力之一就是接真实脑电设备。
+# 如果只做仿真演示，缺了它也不影响启动（代码会显式提示"仅仿真源可用"）。
+dependencies = ["numpy>=1.26", "pylsl==1.18.2"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+engine = ["ningsi"]
+
+[project.scripts]
+ningsi-studio = "ningsi_studio.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ningsi_studio = ["db/*.sql"]

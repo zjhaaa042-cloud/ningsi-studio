@@ -1,0 +1,14 @@
+# 运行产物与本地环境（不要提交）
+.venv/
+var/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+export.zip
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
