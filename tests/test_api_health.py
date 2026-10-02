@@ -39,6 +39,8 @@ class HealthTests(StudioTestCase):
                          "data_dir 应为注入的临时数据目录")
         self.assertEqual(payload["db"], str(self.data_dir / "studio.sqlite3"),
                          "数据库应位于 data_dir 下的 studio.sqlite3")
+        self.assertEqual(payload["runs_root"], str(self.data_dir / "runs"),
+                         "runs_root 应为 data_dir 下的 runs（每次会话的产物与台账目录）")
         self.assertEqual(payload["max_active_sessions"], self.max_active_sessions,
                          "并发上限应与设置一致")
         self.assertIsInstance(payload["active_sessions"], list, "active_sessions 应为数组")
@@ -158,6 +160,66 @@ class DevicesTests(StudioTestCase):
     def test_devices_probe_must_be_number(self) -> None:
         response = self.get("/api/devices?probe=abc")
         self.assert_error(response, 422, "validation_failed", "probe 非数字应返回 422")
+
+
+class OverviewTests(StudioTestCase):
+    """`/api/overview` 首页总览（在此之前零覆盖）。"""
+
+    port_base = 18910
+
+    def test_overview_structure(self) -> None:
+        self.create_subject(auto_id=True, label="总览被试")
+        session = self.create_session("o01", time_scale=1.0)
+
+        payload = self.json_body(self.get("/api/overview"), 200, "总览接口应返回 200")
+        for key in ("subjects", "sessions", "sessions_done", "alerts", "latest",
+                    "latest_detail", "subjects_recent", "active_sessions", "source_note"):
+            self.assertIn(key, payload, f"总览应含 {key}")
+        self.assertGreaterEqual(payload["subjects"], 1, "至少应统计到刚建的被试")
+        self.assertGreaterEqual(payload["sessions"], 1, "至少应统计到刚建的会话")
+        self.assertIn(session["uuid"], payload["active_sessions"],
+                      "运行中的会话应出现在 active_sessions")
+
+        latest = payload["latest_detail"]
+        self.assertTrue(latest, "latest_detail 不应为空（刚建了会话）")
+        self.assertEqual(latest[0]["uuid"], session["uuid"], "最新会话应排在最前")
+        for key in ("uuid", "participant", "status", "phase", "source"):
+            self.assertIn(key, latest[0], f"latest_detail 项应含 {key}")
+
+        recent = payload["subjects_recent"]
+        self.assertIsInstance(recent, list, "subjects_recent 应为数组")
+        self.assertTrue(recent, "应至少给出一个最近被试")
+        for key in ("public_id", "label", "consent_version"):
+            self.assertIn(key, recent[0], f"最近被试应含 {key}")
+        self.assertTrue(payload["source_note"], "总览应给出当前数据源的说明文案")
+
+
+class DeviceStatusTests(StudioTestCase):
+    """`/api/devices/status` 运行中会话的设备体检（在此之前零覆盖）。"""
+
+    port_base = 18912
+
+    def test_device_status_reports_active_sources(self) -> None:
+        session = self.create_session("d01", time_scale=1.0)
+        uuid = session["uuid"]
+
+        payload = self.json_body(self.get("/api/devices/status"), 200, "设备体检应返回 200")
+        for key in ("active_sessions", "devices", "sources"):
+            self.assertIn(key, payload, f"设备体检应含 {key}")
+        self.assertIn(uuid, payload["active_sessions"], "运行中的会话应出现在 active_sessions")
+
+        item = next((one for one in payload["devices"] if one["session"] == uuid), None)
+        self.assertIsNotNone(item, "运行中的会话应有一条设备记录")
+        for key in ("session", "key", "kind", "device", "srate", "channels", "note", "live"):
+            self.assertIn(key, item, f"设备记录应含 {key}")
+        self.assertEqual(item["key"], "sim-bsense", "仿真会话的设备 key 应为 sim-bsense")
+        self.assertEqual(item["kind"], "sim", "仿真会话的设备 kind 应为 sim")
+        self.assertEqual(item["device"], "sim-bsense", "应回显仿真设备名")
+        self.assertTrue(item["live"], "仿真源没有硬件，应直接标记 live=true")
+
+        sources = payload["sources"]
+        self.assertTrue(sources, "设备体检应顺带列出可用数据源")
+        self.assertEqual(sources[0]["key"], "sim-bsense", "首个数据源应为内置仿真源")
 
 
 class OpenApiTests(StudioTestCase):

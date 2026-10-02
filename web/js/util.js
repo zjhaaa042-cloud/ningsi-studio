@@ -518,3 +518,32 @@ export function statusText(status) {
 export function phaseStateText(state) {
   return PHASE_STATE_TEXT[state] || fmtText(state);
 }
+
+/**
+ * 终态阶段文案：`done` / `error` / `cancelled` 不是流程阶段，后端下发的 `phase_label` 为 null
+ * （后端不编造），这里只补一层本地化。**流程阶段的中文名一律用后端 `phase_label`**
+ * （取自 core/phases.py 的 PHASE_BY_KEY），前端不再维护第二张译名表，避免两套叫法。
+ */
+export const PHASE_TEXT = {
+  done: '已完成',
+  error: '失败',
+  failed: '失败',
+  cancelled: '已取消',
+  canceled: '已取消',
+  running: '进行中',
+  pending: '等待中',
+};
+
+/**
+ * 阶段文案。`label`（后端 phase_label）优先，但**详情接口对终态会话会把 phase_label
+ * 退化成原始键**（列表接口是 null，详情接口是 `done`／`error`），所以 label 与键相同时
+ * 视为"没有译名"，改用终态映射。未知键**原样返回**，后端将来新增阶段时先露出键名，
+ * 而不是被吞成 —。
+ */
+export function phaseText(phase, label) {
+  // 例：phase='done', label='done' → 走终态映射得到"已完成"；label='睁眼基线' → 直接用
+  if (label && String(label) !== String(phase)) return String(label);
+  if (phase === null || phase === undefined || phase === '') return DASH;
+  const key = String(phase);
+  return PHASE_TEXT[key] || key;
+}

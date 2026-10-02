@@ -234,6 +234,12 @@ class DemoFlowTests(StudioTestCase):
                     "rejected", "rejected_reasons", "note"):
             self.assertIn(key, global_trend, f"跨会话趋势应含 {key}")
         self.assertIsInstance(global_trend["ledger_points"], list, "台账趋势应为数组")
+        # 台账按会话写在 runs/<uuid>/history/sessions.jsonl：这里不能是空数组，
+        # 且聚合出的 n 之和应等于本用例写入的台账记录数（一次完成会话 = 1 条）。
+        self.assertTrue(global_trend["ledger_points"],
+                        "ledger_points 不应为空（台账写在 runs/<uuid>/history/sessions.jsonl）")
+        self.assertEqual(sum(point["n"] for point in global_trend["ledger_points"]), 1,
+                         "本用例只有一次完成会话，台账聚合的 n 应为 1（条数与记录数一致）")
 
         field_error = self.assert_error(self.get(f"/api/sessions/{uuid}/trend?field=xxx"), 422,
                                         None, "非法 field 应返回 422")

@@ -27,9 +27,9 @@ export function svgEl(tag, attrs = {}, children = []) {
   return node;
 }
 
-function canvas(width, height, padding, label) {
+function canvas(width, height, padding, label, extraClass = '') {
   const root = svgEl('svg', {
-    class: 'chart',
+    class: 'chart' + (extraClass ? ` ${extraClass}` : ''),
     viewBox: `0 0 ${width} ${height}`,
     preserveAspectRatio: 'xMidYMid meet',
     role: 'img',
@@ -73,21 +73,30 @@ function drawYAxis(root, plot, min, max, formatter = (v) => fmtNum(v, 2), ticks 
  * @param {Array<{label:string, values:number[]}>} points
  * @param {{ series?:string[], colors?:string[], height?:number, max?:number, thresholds?:Array<{value:number,label?:string}> }} options
  */
+/**
+ * 画布宽度：优先按容器实际宽度出图（1:1 像素），否则退回 720。
+ *
+ * 为什么必须量宽度：SVG 是 `width:100%; height:auto`，viewBox 比例会被等比放大——
+ * 720×220 的图放进 1250px 宽的卡片会渲染成 382px 高，字号也被放大 1.7 倍，
+ * 既让卡片虚高又让坐标轴文字失衡。量到真实宽度后 height 才是"真的多少像素高"。
+ */
+function measureWidth(container, fallback = 720) {
+  const raw = container && (container.clientWidth
+    || (container.parentElement && container.parentElement.clientWidth));
+  const width = Number(raw);
+  if (!Number.isFinite(width) || width < 320) return fallback;
+  return Math.round(Math.min(width, 1600));
+}
+
 export function drawLineChart(container, points = [], options = {}) {
   container.textContent = '';
-  const width = 720;
+  const width = options.width || measureWidth(container);
   const height = options.height || 220;
   const padding = [16, 24, 28, 44];
   const { root, plot } = canvas(width, height, padding, options.label || '折线图');
   const rows = list(points).filter((point) => point);
   const seriesNames = options.series || ['focus'];
   const colors = options.colors || SERIES_COLORS;
-
-  if (!rows.length) {
-    emptyText(root, plot, options.emptyText || '暂无数据');
-    container.append(root);
-    return root;
-  }
 
   const values = [];
   for (const row of rows) {
@@ -99,8 +108,20 @@ export function drawLineChart(container, points = [], options = {}) {
   const max = options.max !== undefined ? options.max : Math.max(1e-6, ...values);
   const min = options.min !== undefined ? options.min : Math.min(0, ...values);
   const spanMax = options.percent ? 1 : Math.max(max, 1e-6);
+  const formatTick = options.percent ? (v) => `${Math.round(v * 100)}%` : (v) => fmtNum(v, 2);
 
-  drawYAxis(root, plot, min, spanMax, options.percent ? (v) => `${Math.round(v * 100)}%` : (v) => fmtNum(v, 2));
+  // 空数据也要画出坐标轴刻度：只放一句"暂无数据"看起来像坏图
+  if (!rows.length) {
+    drawYAxis(root, plot, min, spanMax, formatTick);
+    root.append(svgEl('line', {
+      x1: plot.x, x2: plot.x + plot.w, y1: plot.y + plot.h, y2: plot.y + plot.h, class: 'chart__axis',
+    }));
+    emptyText(root, plot, options.emptyText || '暂无数据');
+    container.append(root);
+    return root;
+  }
+
+  drawYAxis(root, plot, min, spanMax, formatTick);
 
   // 阈值线（例如预警阈值），中性虚线
   for (const threshold of list(options.thresholds)) {
@@ -116,7 +137,13 @@ export function drawLineChart(container, points = [], options = {}) {
     }
   }
 
+  // 单点时没有"步长"可算：直接放在绘图区中央，否则会贴在最左边几乎看不见
   const stepX = rows.length > 1 ? plot.w / (rows.length - 1) : 0;
+  const xAt = (index) => (rows.length > 1 ? plot.x + stepX * index : plot.x + plot.w / 2);
+  const showPoints = options.points !== false && rows.length <= 60;
+  const pointRadius = options.pointRadius !== undefined
+    ? Number(options.pointRadius)
+    : (rows.length <= 3 ? 4.5 : 2.6);
   seriesNames.forEach((name, seriesIndex) => {
     const color = colors[seriesIndex % colors.length];
     // 缺失点（null）处断开折线，避免用直线"脑补"出不存在的数据
@@ -129,12 +156,19 @@ export function drawLineChart(container, points = [], options = {}) {
         pen = false;
         return;
       }
-      const x = plot.x + stepX * index;
+      const x = xAt(index);
       const y = scale(value, min, spanMax, plot.y + plot.h, plot.y);
       path += `${pen ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)} `;
       pen = true;
-      if (rows.length <= 32) {
-        root.append(svgEl('circle', { cx: x, cy: y, r: 2.6, fill: color, stroke: color }));
+      if (showPoints) {
+        root.append(svgEl('circle', { cx: x, cy: y, r: pointRadius, fill: color, stroke: color }));
+      }
+      // 少量点时把数值标在点旁：单点趋势图必须能直接读出当期数值
+      if (options.showValues && (rows.length <= 12 || index === rows.length - 1)) {
+        root.append(svgEl('text', {
+          x, y: Math.max(plot.y + 10, y - pointRadius - 6),
+          class: 'chart__tick', 'text-anchor': 'middle',
+        }, [document.createTextNode(options.percent ? `${(value * 100).toFixed(1)}%` : fmtNum(value, 3))]));
       }
     });
     if (path) {
@@ -142,11 +176,11 @@ export function drawLineChart(container, points = [], options = {}) {
     }
   });
 
-  // X 轴标签：点多时隔位显示，避免重叠
+  // X 轴标签：点多时隔位显示，避免重叠；单点时居中显示
   const stride = Math.ceil(rows.length / 8);
   rows.forEach((row, index) => {
     if (index % stride !== 0 && index !== rows.length - 1) return;
-    const x = plot.x + stepX * index;
+    const x = xAt(index);
     root.append(svgEl('text', {
       x, y: plot.y + plot.h + 16, class: 'chart__tick', 'text-anchor': 'middle',
     }, [document.createTextNode(String(row.label ?? DASH).slice(0, 12))]));
@@ -170,13 +204,19 @@ export function drawBarChart(container, items = [], options = {}) {
   const padding = [16, 24, 30, 44];
   const { root, plot } = canvas(width, height, padding, options.label || '柱状图');
   const rows = list(items).filter((row) => row && typeof row.value === 'number' && Number.isFinite(row.value));
+  const formatTick = options.percent ? (v) => `${Math.round(v * 100)}%` : (v) => fmtNum(v, 2);
   if (!rows.length) {
+    // 空态保留坐标轴刻度，避免看起来像"坏图"
+    drawYAxis(root, plot, 0, options.max !== undefined ? options.max : 1, formatTick);
+    root.append(svgEl('line', {
+      x1: plot.x, x2: plot.x + plot.w, y1: plot.y + plot.h, y2: plot.y + plot.h, class: 'chart__axis',
+    }));
     emptyText(root, plot, options.emptyText || '暂无数据');
     container.append(root);
     return root;
   }
   const max = options.max !== undefined ? options.max : Math.max(...rows.map((row) => row.value), 1e-6);
-  drawYAxis(root, plot, 0, max, options.percent ? (v) => `${Math.round(v * 100)}%` : (v) => fmtNum(v, 2));
+  drawYAxis(root, plot, 0, Math.max(max, 1e-6), formatTick);
 
   const slot = plot.w / rows.length;
   const barWidth = Math.max(6, Math.min(46, slot * 0.62));
@@ -210,7 +250,9 @@ export function drawGauge(container, value, options = {}) {
   container.textContent = '';
   const width = 320;
   const height = 190;
-  const { root } = canvas(width, height, [10, 10, 10, 10], options.label || '仪表');
+  // 仪表按 viewBox 固定比例显示：容器太宽时 SVG 会被等比放大成几百像素高的大控件，
+  // 视觉上把整行撑开（用 .chart--gauge 限制最大宽度，见 css/app.css）
+  const { root } = canvas(width, height, [10, 10, 10, 10], options.label || '仪表', 'chart--gauge');
   const cx = width / 2;
   const cy = 140;
   const radius = 96;
@@ -269,12 +311,9 @@ export function drawGauge(container, value, options = {}) {
   root.append(svgEl('text', {
     x: cx, y: cy + 6, class: 'chart__tick', 'text-anchor': 'middle',
   }, [document.createTextNode(usable ? '分' : '不可用')]));
-  if (options.note) {
-    root.append(svgEl('text', {
-      x: cx, y: cy + 30, class: 'chart__tick', 'text-anchor': 'middle',
-    }, [document.createTextNode(options.note)]));
-  }
   container.append(root);
+  // 说明放在 SVG 之外：viewBox 只有 320 宽，长文案写进 SVG 会溢出控件边界
+  if (options.note) container.append(el('p', { class: 'chart__note muted', text: options.note }));
   return root;
 }
 

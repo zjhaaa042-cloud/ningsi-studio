@@ -125,13 +125,25 @@ function renderNav() {
 
 /* ------------------------------------------------------------------ 顶栏 */
 
+/** 设备键 → 数据源类别：lsl:xxx 是实时设备，sim / sim-bsense 是仿真（source_kind 缺失时的兜底）。 */
+function kindFromKey(key) {
+  const raw = String(key || '').toLowerCase();
+  if (!raw) return null;
+  if (raw.startsWith('lsl:')) return 'lsl';
+  if (raw === 'sim' || raw.startsWith('sim-')) return 'sim';
+  return null;
+}
+
 /** 数据来源徽标：仿真源必须写明"数据来源：仿真"。 */
 function sourceText(kind, note, key) {
-  if (!kind && !key) return '数据来源：—';
-  const normalized = String(kind || '').toLowerCase();
+  // /api/health 那条路径上 source_kind 可能为空：按设备键的命名约定兜底，
+  // 否则历史会话会退化成显示设备型号（"数据来源：sim-bsense"）
+  const effective = kind || kindFromKey(key);
+  if (!effective) return key ? `数据来源：${key}${note ? `（${note}）` : ''}` : '数据来源：—';
+  const normalized = String(effective).toLowerCase();
   if (normalized === 'sim') return '数据来源：仿真';
   if (normalized === 'lsl') return `数据来源：实时设备（${key || 'LSL'}）`;
-  return `数据来源：${kind || key || '未知'}${note ? `（${note}）` : ''}`;
+  return `数据来源：${effective}${note ? `（${note}）` : ''}`;
 }
 
 function updateHeader() {
@@ -153,10 +165,13 @@ function updateHeader() {
   const kind = runtime.source_kind || null;
   const note = runtime.source_note || pick(health, 'overview.source_note', null);
   const deviceKey = pick(session, 'device', null) || pick(health, 'overview.source', null);
+  // 历史已结束会话的 runtime.source_kind 可能是空的：按设备键兜底判定类别，
+  // 徽标文案与"仿真高亮"用同一个 effectiveKind，避免一个说仿真、一个不高亮
+  const effectiveKind = kind || kindFromKey(deviceKey);
   const label = sourceText(kind, note, deviceKey);
   sourceBadge.textContent = label;
   sourceBadge.title = note || '数据来源标注（仿真数据会在界面与报告中显式标注）';
-  sourceBadge.classList.toggle('badge--strong', String(kind || '').toLowerCase() === 'sim');
+  sourceBadge.classList.toggle('badge--strong', String(effectiveKind || '').toLowerCase() === 'sim');
 
   const specs = pick(health, 'engine', null) || pick(config, 'specs', {}) || {};
   engineBadge.textContent = `口径：${Object.entries(specs).map(([key, value]) => `${key}=${value}`).join(' / ') || '—'}`;

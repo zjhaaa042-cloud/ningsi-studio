@@ -35,10 +35,13 @@
               "baseline": "baseline-v1", "assessment": "joint-assessment-v1" },
   "engine_path": ".../ningsi/src/ningsi/__init__.py",
   "db": ".../var/studio/studio.sqlite3", "data_dir": ".../var/studio",
+  "runs_root": ".../var/studio/runs",
   "active_sessions": ["<uuid>"], "max_active_sessions": 2,
   "overview": { "subjects": 1, "sessions": 3, "sessions_done": 2, "alerts": 5, "latest": [] }
 }
 ```
+`runs_root` 是会话运行目录的根：每个会话写在 `<runs_root>/<uuid>/`，其 JSONL 台账在
+`<runs_root>/<uuid>/history/sessions.jsonl`（全局趋势的 `ledger_points` 就是从这里汇总的）。
 
 ### `GET /api/config`
 返回 `version`、`specs`、`window_sec`(4.0)、`step_sec`(2.0)、`welch`、`bands`、`total_band`、
@@ -122,23 +125,35 @@
 
 响应 `201`：
 ```json
-{ "session": { "uuid": "<32位>", "participant": "p01", "status": "running", "phase": "qc",
+{ "session": { "uuid": "<32位>", "participant": "p01", "subject_id": 1, "label": "第一次训练",
+                "status": "running", "phase": "qc",
                 "phase_label": "设备质检", "progress": 0.0, "device": "sim-bsense",
-                "time_scale": 0.05, "training_mode": "quick", "engine_versions": {},
+                "time_scale": 0.05, "training_mode": "quick",
+                "engine_versions": { "spectrum": "welch-v1", "indicator": "indicator-v1",
+                                     "baseline": "baseline-v1", "assessment": "joint-assessment-v1" },
                 "source": "sim-bsense", "srate": 250.0, "channels": 1,
-                "started_at": "...", "ended_at": null, "error": null },
+                "started_at": "...", "ended_at": null, "created_at": "...", "error": null },
   "events_url": "/api/sessions/<uuid>/events",
   "phases": [ { "key": "qc", "label": "设备质检", "interactive": false, "weight": 0.04 } ],
   "runtime": { "alive": true, "source": "sim-bsense" } }
 ```
+`source` 是**实际数据源**：`device` 传 `lsl:<name>` 但流没起来时运行时会降级为仿真源，此时响应里的
+`source` 会回写成 `sim-bsense`（与 `runtime.source` / `GET .../{uuid}` 的
+`runtime.source_kind` 同源），不会出现"标着 lsl、实际跑 sim"的自相矛盾。
 并发超限返回 `429`。
 
 ### `GET /api/sessions?participant=p01&status=done&page=1&limit=50`
-`items[]` 为会话对象，额外含 `alert_count`。
+`items[]` 为会话对象，额外含 `alert_count` 与 `phase_label`（已知阶段的**中文名**，与详情接口同一张
+`core/phases.py` 映射表；终态 `done`/`error`/`cancelled` 不是流程阶段，此字段为 `null`，由界面本地化）。
 
 ### `GET /api/sessions/{uuid}`
-会话对象 + `alerts`、`runs`（每阶段一行：`phase/status/duration_ms/error/payload`）、
-`artifacts`、`indicator_summary`、`runtime{ alive, awaiting_input, source, source_kind }`。
+会话对象 + `alerts`、`runs`（每阶段一行：`phase/status/duration_ms/error/payload`；`payload` 已解析为
+对象，不是 JSON 字符串）、`artifacts`、`indicator_summary`、
+`runtime{ alive, awaiting_input, source, source_kind }`。
+`runtime.source_kind` 优先取运行期实际种类；**运行器已被回收的历史会话**按落库的 `source` 键反推
+（`lsl:` ⇒ `lsl`，仿真键 ⇒ `sim`），避免会话结束后界面上"仿真"标注消失（`_source_kind_from_key`）。
+会话仍在运行时，`source` 取运行时**实际**数据源，与 `runtime.source` / `runtime.source_kind`
+一致（LSL 未就绪而内部降级为仿真时，这里会显示 `sim`，不会仍标 `lsl`）。
 
 ### `DELETE /api/sessions/{uuid}`
 取消运行中的会话，返回 `{"cancelled": true, "uuid": "..."}`；不在运行中返回 `409`。
@@ -157,7 +172,7 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 
 | event | data 关键字段 |
 |---|---|
-| `started` | `participant, device, source_kind, source_note, time_scale, auto, phases[], engine_versions` |
+| `started` | `uuid, participant, device, source_kind, source_note, time_scale, auto, phases[], engine_versions` |
 | `notice` | `level, message`（例如"当前使用仿真脑电源"） |
 | `phase` | `key, label, state(running/done), progress` |
 | `progress` | `key, progress, windows_done?, windows_total?, trials_done?, trials_total?, segments_done?, segments_total?` |
@@ -166,13 +181,13 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `window` | `index, t_end, state, usable, quality, scores{focus,relax,load}, index_z, band_z, reasons[], alerts[], signal{srate,channels,samples[],relative,time_domain}` |
 | `scale_request` | `code, label, size, instruction` |
 | `scale_scored` | `code, raw_score, standard_score, level` |
-| `behavior_request` | `task, digits[], nogo_trials, practice[], sequence_set_id, seed`（PVT 为 `onsets[],duration_sec`） |
+| `behavior_request` | `task, digits[], nogo_trials, practice[], sequence_set_id, seed, instruction`（PVT 为 `trials, onsets[], duration_sec, lapse_sec, instruction`） |
 | `trial` | SART：`phase(practice/main/done), index, digit, total`；PVT：`index, onset, total` |
 | `behavior` | `task, result{...}` |
 | `monitor` | `summary, quality` |
 | `feedback` | `segment, target, score, on_target, usable, t` |
-| `segment` | `seq, index, target, target_after, hold_sec, hold_after, stats{mean,on_target_ratio,volatility,n}, samples[[t,score]]` |
-| `training_start` | `mode, segments, segment_sec, target, rationale, hold_sec` |
+| `segment` | `seq, index, target, target_after, hold_sec, hold_after, duration_sec, excluded_windows, stats{mean,on_target_ratio,volatility,n,achieved}, mean_score, on_target_ratio, volatility, n, achieved, samples[[t,score]]` |
+| `training_start` | `mode, segments, segment_sec, target, rationale, initial_from, target_step, hold_sec` |
 | `assessment` | 同 `GET .../assessment` |
 | `scales` | `results[]`（SAS/SDS 计分结果汇总，量表阶段结束时下发一次） |
 | `model` | `spec, features[], subject_split, train, validation, test, model_path` |
@@ -192,7 +207,9 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 - `seconds`：每帧覆盖的时间跨度（2–30 秒，默认 10）
 - `points`：每通道最多返回多少个点（200–4000，默认 1200）；抽稀用 **min/max 保峰值**，
   尖峰/伪迹不会被均匀抽样抹掉
-- 会话不在运行中时返回 409
+- 会话不在运行中时返回 `409`，走**统一错误体**（`{"error":{"code":"conflict","message":...}}`，
+  不是自造的 `session_not_running`）；会话结束（`finished`/`cancelled`）后服务端会停止推帧并收流，
+  客户端应以 `EventSource.onerror` + `GET .../live` 的 `runtime_alive` 作为降级依据，不必依赖连接 EOF
 
 事件类型固定为 `signal`：
 ```json
@@ -286,9 +303,11 @@ lapse_rate, false_starts, valid`。
   `spec, conclusion, dimension_states{attention,stress}, consistency{eeg_vs_scale,eeg_vs_behavior},
   evidence[{code,source,dimension,summary,value,direction,available,ref}], advice[], boundary`。
   评估未完成时 `409`。
-- `GET /api/sessions/{uuid}/training` → `{ "segments": [...], "summary": {...} }`；
-  `summary` 含 `mean_focus, on_target_ratio, first_to_last_change, baseline_before,
-  baseline_after, target_rationale, baseline_comparable`。
+- `GET /api/sessions/{uuid}/training` → `{ "segments": [...], "summary": {...} }`（`segments[]` 的字段见
+  上方 `segment` 事件）；`summary` 含 `mean_focus, on_target_ratio, first_to_last_change, baseline_before,
+  baseline_after, target_rationale, baseline_comparable`，另含 `describe`（训练方案：
+  `mode, segments, segment_sec, target, rationale, initial_from, target_step, hold_sec`，
+  与 `training_start` 事件同一份）。
 - `GET /api/sessions/{uuid}/report` → 报告 JSON（`spec/participant/indicators/quality/scales/
   behavior/assessment/extras`），并附 `report_markdown`（报告原文，Markdown 文本）与
   `report_markdown_path`；尚未生成时返回 `202` 且带 `partial: true` 与阶段进度。
@@ -300,11 +319,15 @@ lapse_rate, false_starts, valid`。
 ## 模型与趋势
 
 - `POST /api/models/train` → `{ "subjects": 6, "windows_per_state": 8 }`
-  返回 `spec, features[], subject_split{train,validation,test}, samples, train, validation, test,
-  model_path`。
+  返回 `spec, version`（引擎 `config.VERSION`）、`features[]`、`subject_split{train,validation,test}`、
+  `samples`（= 被试数 × 状态数 × 每状态窗数）、`participants[]`（参与训练的被试编号）、
+  `train, validation, test`（后两者在划分不足时可能为 `null`）、`model_path`。
 - `GET /api/reports/trend?participant=p01&field=focus&period=week`
   → `points[]`（来自数据库）、`ledger_points[]`（来自 JSONL 台账）、`sessions`、
   `comparable` / `rejected` / `rejected_reasons`（可比性过滤结果）、`note`。
+  `ledger_points` 汇总的是**每个会话自己的**台账 `<runs_root>/<uuid>/history/sessions.jsonl`
+  （外加 `export-ledger` 导出的 `<data_dir>/history/sessions.jsonl`），按 `session_uuid` 去重；
+  聚合口径与 `GET .../{uuid}/trend` 一致（`period/mean/n/std`，并带 `rejected` 计数）。
 
 ---
 

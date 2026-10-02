@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     device          TEXT,
     srate           REAL,
     channels        INTEGER,
-    source          TEXT,                          -- sim-bsense / lsl:<name>
+    source          TEXT,                          -- 实际数据源：sim-bsense / lsl:<name>（LSL 未就绪而降级时会回写为 sim-bsense）
     time_scale      REAL NOT NULL DEFAULT 1.0,
     training_mode   TEXT NOT NULL DEFAULT 'quick',
     status          TEXT NOT NULL DEFAULT 'queued',-- queued|running|done|failed|cancelled
@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, id);
 
--- 逐窗指标：kind = focus|relax|load|band_z|quality
+-- 指标：kind = indicator（逐窗指标，name 为 focus/relax/load/band_z/quality 等）
+--             | indicator_summary（阶段汇总统计，写在 runs.payload 的同时落一份）
+-- 每行一个 (kind, name) 序列：t_sec/value 用于逐窗，mean/std/n 用于汇总
 CREATE TABLE IF NOT EXISTS metrics (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -140,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_training_session ON training_segments(session_id,
 CREATE TABLE IF NOT EXISTS artifacts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL,                     -- report_md|report_json|heatmap_svg|trend_svg|model|zip|ledger
+    kind        TEXT NOT NULL,                     -- report_md|report_json|heatmap_svg|trend_svg|model|history|zip
     path        TEXT NOT NULL,
     bytes       INTEGER,
     sha256      TEXT,

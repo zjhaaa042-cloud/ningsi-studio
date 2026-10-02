@@ -1,8 +1,10 @@
 """SSE 事件流：运行中会话的 phase/window/progress、非运行会话的快照与 closed、
-以及 `Last-Event-ID` 重放。"""
+`Last-Event-ID` 重放，以及高频信号流（/signal）与实时信号注册表的回收。"""
 
 from __future__ import annotations
 
+import http.client
+import json
 import time
 
 try:                                              # 支持直接以脚本方式运行本文件
@@ -13,6 +15,9 @@ except ModuleNotFoundError:                       # pragma: no cover - 仅脚本
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from tests.helpers import QUICK_TIME_SCALE, StudioTestCase
+
+from ningsi_studio.api.routes import StudioSessionManager
+from ningsi_studio.core import signal_feed
 
 
 class EventStreamRunningTests(StudioTestCase):
@@ -203,6 +208,129 @@ class EventStreamLiveFallbackTests(StudioTestCase):
         self.assertTrue(payload["runtime_alive"], "会话运行中 runtime_alive 应为 true")
         self.assertIsInstance(payload["alerts"], list, "alerts 应为数组")
         self.assertIsInstance(payload["awaiting_input"], list, "awaiting_input 应为数组")
+
+
+class SignalStreamTests(StudioTestCase):
+    """`/signal` 高频信号流：帧契约、NaN/Inf 净化、非运行会话的统一 409 错误体。"""
+
+    port_base = 18946
+
+    def open_signal_stream(self, session_uuid: str, query: str = ""):
+        """打开 `/signal` 长连接（helpers 的 open_event_stream 只指向 /events）。"""
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10.0)
+        connection.request("GET", f"/api/sessions/{session_uuid}/signal{query}",
+                           headers={"Accept": "text/event-stream"})
+        return connection, connection.getresponse()
+
+    @staticmethod
+    def read_first_signal_frame(response, timeout: float = 15.0):
+        """读到第一帧 signal，并返回 `(帧对象, 原始 SSE 文本)`。
+
+        原始文本是必须的：Python 的 `json.loads` **接受** 裸 `NaN`/`Infinity`，
+        只看解析结果无法发现"浏览器会整帧丢弃"这个问题。
+        """
+        raw_lines: list = []
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            raw = response.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line or line.startswith(":"):
+                continue
+            raw_lines.append(line)
+            if line.startswith("data:"):
+                return json.loads(line[5:].strip()), "\n".join(raw_lines)
+        raise AssertionError(f"未在 {timeout}s 内读到 signal 帧；已读到 {raw_lines[:20]}")
+
+    def test_signal_frames_match_contract_and_have_no_nan(self) -> None:
+        session = self.create_session("g01", time_scale=1.0)
+        uuid = session["uuid"]
+        connection, response = self.open_signal_stream(uuid, "?hz=5&seconds=2&points=200")
+        try:
+            self.assertEqual(response.status, 200, "运行中会话的 /signal 应返回 200")
+            self.assertIn("text/event-stream", response.getheader("Content-Type") or "",
+                          "/signal 的 Content-Type 应为 text/event-stream")
+            frame, raw_text = self.read_first_signal_frame(response)
+        finally:
+            self.close_event_stream(connection)
+
+        self.assertNotIn("NaN", raw_text, "SSE 帧里不能有裸 NaN（浏览器 JSON.parse 会丢弃整帧）")
+        self.assertNotIn("Infinity", raw_text, "SSE 帧里不能有裸 Infinity")
+        self.assertEqual(frame["type"], "signal", "信号帧类型应为 signal")
+        self.assertEqual(frame["session"], uuid, "信号帧应带本会话 uuid")
+        self.assertEqual(frame["refresh_hz"], 5.0, "refresh_hz 应回显请求的 5 FPS（retune 生效）")
+        self.assertEqual(frame["window_sec"], 2.0, "window_sec 应回显请求的 2 秒")
+        self.assertTrue(frame["realtime"], "仿真源应有实时数据")
+        self.assertEqual(frame["source_kind"], "sim", "仿真会话的 source_kind 应为 sim")
+        self.assertGreaterEqual(frame["channel_count"], 1, "至少应有一路通道")
+        channel = frame["channels"][0]
+        for key in ("index", "label", "unit", "peak", "points", "raw_points", "samples"):
+            self.assertIn(key, channel, f"通道帧应含 {key}")
+        self.assertTrue(channel["samples"], "通道波形不应为空")
+        self.assertLessEqual(len(channel["samples"]), 400,
+                             "points=200 时 min/max 抽稀后点数不应超过 2×200")
+
+    def test_signal_for_non_running_session_returns_conflict(self) -> None:
+        session = self.create_session("g02", time_scale=1.0)
+        uuid = session["uuid"]
+        self.cancel_session_via_api(uuid)
+        self.wait_for(lambda: self.session_detail(uuid),
+                      lambda item: not item["runtime"]["alive"], timeout=25.0,
+                      message="取消后运行线程应退出")
+
+        error = self.assert_error(self.get(f"/api/sessions/{uuid}/signal"), 409, "conflict",
+                                  "非运行会话的 /signal 应返回统一 409 错误体（不再手拼响应体）")
+        self.assertIn("运行", error["message"], "409 消息应说明会话不在运行中")
+
+
+class SignalFeedRegistryTests(StudioTestCase):
+    """实时信号注册表不随会话数增长：会话结束与应用停止都必须回收 feed。"""
+
+    port_base = 18948
+
+    @staticmethod
+    def _probe_feed(registry, session_uuid: str):
+        return registry.get_or_create(
+            session_uuid,
+            lambda: signal_feed.SignalFeed(session_uuid, lambda seconds: None,
+                                           srate=250.0, channels=1))
+
+    def test_feed_reclaimed_after_session_ends(self) -> None:
+        session = self.create_session("g11", time_scale=1.0)
+        uuid = session["uuid"]
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10.0)
+        connection.request("GET", f"/api/sessions/{uuid}/signal?hz=5",
+                           headers={"Accept": "text/event-stream"})
+        response = connection.getresponse()
+        try:
+            self.assertEqual(response.status, 200, "运行中会话的 /signal 应返回 200")
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                raw = response.readline()
+                if not raw or raw.startswith(b"data:"):
+                    break
+            self.assertIsNotNone(signal_feed.REGISTRY.get(uuid),
+                                 "推流期间注册表里应有该会话的 feed")
+        finally:
+            self.close_event_stream(connection)
+
+        self.cancel_session_via_api(uuid)
+        self.wait_for(lambda: signal_feed.REGISTRY.get(uuid),
+                      lambda feed: feed is None, timeout=25.0,
+                      message="会话结束后 feed 必须从注册表回收（否则每个开过实时监测的会话都留一份）")
+
+    def test_app_shutdown_stops_registry_feeds(self) -> None:
+        """应用停止路径：`SessionManager.shutdown()` 必须顺带 `stop_all()`。"""
+        probe_uuid = "shutdown-probe"
+        feed = self._probe_feed(signal_feed.REGISTRY, probe_uuid)
+        self.assertIsNotNone(signal_feed.REGISTRY.get(probe_uuid), "探针 feed 应已登记")
+
+        StudioSessionManager(self.app.settings).shutdown()
+
+        self.assertIsNone(signal_feed.REGISTRY.get(probe_uuid),
+                          "shutdown() 后注册表应被清空（stop_all）")
+        self.assertTrue(feed._stop.is_set(), "shutdown() 必须停掉 feed 的推帧线程")
 
 
 if __name__ == "__main__":                        # pragma: no cover - 便于单文件调试

@@ -14,12 +14,19 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from ningsi_studio.http.router import jsonable
 from ningsi_studio.settings import Settings
 
 
 def encode(event: dict) -> bytes:
-    """把事件字典编码为一段 SSE 消息。"""
-    payload = json.dumps(event, ensure_ascii=False)
+    """把事件字典编码为一段 SSE 消息。
+
+    编码前必须过 `router.jsonable` 这道统一净化：numpy 标量/数组转成原生数值类型，
+    `NaN`/`Inf` → `null`。浏览器侧的 `JSON.parse` **不接受**裸 `NaN`/`Infinity`，
+    一旦混进 data 段，整帧（window/signal）会被前端直接丢弃——所以净化要覆盖 SSE，
+    而不只是走 `Response.json()` 的 JSON 接口。
+    """
+    payload = json.dumps(jsonable(event), ensure_ascii=False)
     event_id = event.get("id")
     name = event.get("type", "message")
     lines = []

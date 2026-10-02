@@ -11,7 +11,7 @@ import { api } from '../api.js';
 import { describeError, toast } from '../store.js';
 import {
   DASH, button, card, el, empty, field, fmtDate, fmtInt, fmtNum, fmtPercent,
-  fmtRelative, list, pick, statusText, table,
+  fmtRelative, list, phaseText, pick, statusText, table,
 } from '../util.js';
 
 const AGE_BANDS = ['16-17', '18-25', '26-35', '36-45', '46-55', '56-65', '65+'];
@@ -240,11 +240,12 @@ async function renderSubjectDetail(host, ctx) {
         class: 'btn btn--sm',
         type: 'button',
         text: `${String(row.uuid).slice(0, 8)}…`,
+        attrs: { title: row.uuid, 'aria-label': `打开会话 ${row.uuid} 的实时监测` },
         onClick: () => ctx.navigate(`#/live?session=${row.uuid}`),
       }),
     },
     { title: '状态', render: (row) => statusText(row.status) },
-    { title: '阶段', render: (row) => row.phase_label || row.phase || DASH },
+    { title: '阶段', render: (row) => phaseText(row.phase, row.phase_label) },
     { title: '进度', align: 'right', render: (row) => fmtPercent(row.progress) },
     { title: '时间倍率', align: 'right', render: (row) => fmtNum(row.time_scale, 2) },
     { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },

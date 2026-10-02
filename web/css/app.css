@@ -457,6 +457,17 @@ button.btn--sm { padding: 4px 9px; font-size: 12px; }
 .chart__point { fill: var(--surface); stroke-width: 2; }
 .chart__empty { fill: var(--text-3); font-size: 12px; }
 
+/* 仪表是 320×190 的 viewBox：若跟着整行宽度等比放大，会变成几百像素高的超大控件，
+   把整张卡（甚至整行）撑开。这里按 viewBox 给一个固定上限并居中。 */
+/* 仪表：viewBox 宽 320，限宽 320 即为 1:1 像素渲染（不再被整行宽度等比放大） */
+.chart--gauge { max-width: 320px; margin-left: auto; margin-right: auto; }
+
+/* 仪表说明放在 SVG 外：长文案不会再溢出控件边界 */
+.chart__note { margin: 6px 0 0; text-align: center; }
+
+/* 图表宿主：图与下方表格之间的间距收紧，避免卡片被空白撑高 */
+.chart-host { margin: 4px 0 2px; }
+
 /* 三类指标各用一档接口色（与热力图同源），保证不与状态色混淆 */
 .series-0 { stroke: #1B3B6F; }
 .series-1 { stroke: #2E6DA4; }

@@ -56,6 +56,38 @@ def _subject_row(conn, public_id: str):
     return row
 
 
+def _source_kind_from_key(source) -> str | None:
+    """从落库的 source 键反推来源种类，供运行器已回收的历史会话使用。
+
+    会话结束后运行器可能已被清理，此时 `runtime.source_kind` 为空，
+    前端顶栏就会从「数据来源：仿真」退化成「数据来源：sim-bsense」，
+    而"仿真数据必须显式标注"是产品承诺，不能因为会话结束了就丢。
+    只按命名约定判定（与 core/live_source.py 的 kind 保持一致），不做猜测：
+    `lsl:` 前缀 ⇒ 实时设备；仿真源键（`sim-bsense`）⇒ 仿真。
+    """
+    key = str(source or "")
+    if key.startswith("lsl:"):
+        return "lsl"
+    if key == live_source.SIM_SOURCE or key.startswith("sim"):
+        return "sim"
+    return None
+
+
+def _decode_payload(value):
+    """把库里存的 JSON 文本还原成对象。
+
+    `runs.payload` 在 SQLite 里是 TEXT，直接回给前端会变成字符串，
+    于是"从 runs 里取质检结果"这类读法永远拿不到值（界面上表现为关键指标空白）。
+    空串/非法 JSON 原样返回，保持"有原始文本可追溯"。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def session_public(row, *, extra: dict | None = None) -> dict:
     payload = {
         "uuid": row["uuid"],
@@ -102,10 +134,38 @@ def _subject_public(row, counts: dict | None = None) -> dict:
 
 # --------------------------------------------------------------------- 路由
 
+class StudioSessionManager(SessionManager):
+    """会话管理器：进程收尾时顺带清掉实时信号注册表。
+
+    `signal_feed.REGISTRY` 是模块级单例，按会话持有 `SignalFeed`。只靠订阅结束时
+    `unsubscribe()` 只会停线程，注册表条目仍会随"开过实时监测的会话数"一直增长。
+    应用停止路径（`app.Application.stop()` 与 `python -m ningsi_studio demo` 的收尾）
+    都走 `SessionManager.shutdown()`，因此在这里补一次 `stop_all()`。
+    """
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        try:
+            super().shutdown(timeout)
+        finally:
+            signal_feed.REGISTRY.stop_all()
+
+
 def build_router(settings: Settings) -> Router:
     router = Router()
-    manager = SessionManager(settings)
+    manager = StudioSessionManager(settings)
     db_path = Path(settings.db_path)
+
+    def sweep_signal_feeds() -> int:
+        """回收已结束会话遗留的实时信号 feed（幂等，可在任意读接口触发）。
+
+        判据是运行器的**实际存活状态**：`manager.get(uuid)` 存在且 `alive` 才算活着，
+        不看库里的 status（库值可能滞后，按它判会误清正在推流的 feed）。
+        """
+        def is_live(session_uuid: str) -> bool:
+            runtime = manager.get(session_uuid)
+            return bool(runtime and runtime.alive)
+
+        return signal_feed.REGISTRY.sweep(is_live)
 
     def rollback_session(uuid: str, reason: str) -> None:
         """会话未能真正启动（并发超限等）时把库里的行收成 failed，不留幽灵会话。"""
@@ -341,6 +401,15 @@ def build_router(settings: Settings) -> Router:
         # 注意：这里必须已经退出 `with store.connect(...)`（事务提交、连接释放），
         # 再启动运行线程；否则运行线程装载会话时会撞上 "database is locked"。
         runtime = manager.start_with_rollback(row["uuid"], lambda reason: rollback_session(row["uuid"], reason))
+        # 运行期会按"真实可用性"选数据源：`lsl:` 流没数据时运行时会退回仿真源，而建会话时
+        # 只按设备名推断 source。若不回写，同一响应里就会出现 source="lsl" 而
+        # runtime.source_kind="sim" 的自相矛盾，等于把"当前是仿真"这件事藏了起来
+        # （live_source.py 顶部与 docs/API.md 都要求如实标注、不做静默替换）。
+        actual_source = getattr(getattr(runtime, "source", None), "key", None)
+        if actual_source and actual_source != row["source"]:
+            with store.connect(db_path) as conn:
+                repo.update_session(conn, row["uuid"], source=actual_source)
+                row = repo.get_session(conn, row["uuid"])
         return Response.json({
             "session": session_public(row, extra={"participant": public_id}),
             "events_url": f"/api/sessions/{row['uuid']}/events",
@@ -359,8 +428,13 @@ def build_router(settings: Settings) -> Router:
                 status=request.query.get("status") or None,
                 limit=limit, offset=offset,
             )
-            items = [session_public(row, extra={"alert_count": len(repo.list_alerts(conn, row["id"]))})
-                     for row in rows]
+            items = [session_public(row, extra={
+                "alert_count": len(repo.list_alerts(conn, row["id"])),
+                # 列表页也要中文阶段名：详情接口早就带 phase_label，列表只回英文键，
+                # 于是仪表盘/历史/被试页的「阶段」列显示 done/error（见前端 phaseText）
+                "phase_label": (phase_module.PHASE_BY_KEY.get(row["phase"]).label
+                                if row["phase"] in phase_module.PHASE_BY_KEY else None),
+            }) for row in rows]
         return Response.json({"items": items, "total": total, "limit": limit,
                               "page": offset // limit + 1})
 
@@ -371,15 +445,29 @@ def build_router(settings: Settings) -> Router:
             row = _session_row(conn, uuid)
             payload = session_public(row)
             payload["alerts"] = jsonable(schemas.rows_to_dicts(repo.list_alerts(conn, row["id"])))
-            payload["runs"] = jsonable(schemas.rows_to_dicts(repo.list_runs(conn, row["id"])))
+            runs = jsonable(schemas.rows_to_dicts(repo.list_runs(conn, row["id"])))
+            # runs[].payload 一定是对象：质检 / 基线 / 训练等阶段中间结果直接可读，
+            # 前端才能用 run.payload.passed 这类读法取到值（见 dashboard.qualityFromRuns）
+            for item in runs:
+                if "payload" in item:
+                    item["payload"] = _decode_payload(item["payload"])
+            payload["runs"] = runs
             payload["artifacts"] = jsonable(schemas.rows_to_dicts(repo.list_artifacts(conn, row["id"])))
             payload["indicator_summary"] = jsonable(repo.latest_metric_summary(conn, row["id"]))
         runtime = manager.get(uuid)
+        actual_source = getattr(getattr(runtime, "source", None), "key", None)
+        if actual_source:
+            # 运行器还在本进程：source 以运行期实际选择为准，
+            # 保证同一响应里 source 与 runtime.source_kind 同源（不会一个 lsl 一个 sim）。
+            payload["source"] = actual_source
         payload["runtime"] = {
             "alive": bool(runtime and runtime.alive),
             "awaiting_input": runtime.awaiting() if runtime else [],
-            "source": runtime.source.key if runtime and runtime.source else None,
-            "source_kind": runtime.source.kind if runtime and runtime.source else None,
+            "source": runtime.source.key if runtime and runtime.source else payload.get("source"),
+            "source_kind": (runtime.source.kind if runtime and runtime.source
+                            # 运行器已回收（会话结束后被清理）时按落库的 source 键反推，
+                            # 否则历史会话的"仿真"标注会消失（见 _source_kind_from_key）
+                            else _source_kind_from_key(payload.get("source"))),
         }
         return Response.json(payload)
 
@@ -428,12 +516,14 @@ def build_router(settings: Settings) -> Router:
         最新样本，只用于显示，不参与指标与计时，因此不影响报告口径。
         """
         uuid = schemas.ensure_uuid(request.params["uuid"])
+        # 顺手回收已结束会话遗留的 feed：非运行会话请求这条流是常态（前端会重连），
+        # 因此把清扫放在存活检查之前，任何一次 /signal 都会顺带做一遍幂等回收。
+        sweep_signal_feeds()
         runtime = manager.get(uuid)
         if runtime is None or not runtime.alive:
-            return Response.json(
-                {"error": {"code": "session_not_running",
-                           "message": "该会话当前没有运行中的数据源，无法推送实时信号"}},
-                status=409)
+            # 统一错误体：409 一律走 Conflict（error.code = "conflict"），
+            # 不手拼响应体绕过 router 的错误体约定（docs/API.md 的状态码表）。
+            raise Conflict("该会话当前没有运行中的数据源，无法推送实时信号")
 
         hz = request.query_float("hz", SIGNAL_DEFAULT_HZ)
         hz = max(1.0, min(SIGNAL_MAX_HZ, hz))
@@ -498,10 +588,23 @@ def build_router(settings: Settings) -> Router:
         feed.retune(signal_feed.SignalConfig(window_sec=window_sec, refresh_hz=hz,
                                              max_points_per_channel=max_points))
         subscriber, preload = feed.subscribe()
+
+        def release_signal_feed() -> None:
+            """流结束时释放订阅；会话已结束且无人订阅时连注册表条目一起回收。
+
+            只在这个条件下 `drop()`：会话还活着时不能动注册表条目，
+            否则会把正在推流的 feed 关掉（同一会话可能有多个订阅者/重连）。
+            """
+            feed.unsubscribe(subscriber)
+            if feed.subscriber_count == 0 and not (runtime and runtime.alive):
+                signal_feed.REGISTRY.drop(uuid)
+
         return sse_response(preload, subscriber.events,
                             heartbeat_sec=settings.sse_heartbeat_sec,
-                            keep_alive=lambda: feed.is_subscribed(subscriber),
-                            on_close=lambda: feed.unsubscribe(subscriber))
+                            # 会话结束后这条流就没有数据源了：主动收流，而不是继续推"停摆后"的帧。
+                            # 收流会触发 on_close，在那里按「会话不存活 + 订阅者归零」回收注册表条目。
+                            keep_alive=lambda: feed.is_subscribed(subscriber) and runtime.alive,
+                            on_close=release_signal_feed)
 
     @router.get(r"/api/sessions/{uuid}/live")
     def session_live(request: Request) -> Response:
@@ -842,7 +945,9 @@ def build_router(settings: Settings) -> Router:
         from ningsi.monitoring import history as history_module
         usable, rejected = _comparable(records, history_module)
         points = history_module.aggregate(usable, field, period)
-        ledger_points = paired_ledger.trend_points(settings.runs_root, field, period)
+        # 台账按会话分别写在 <runs_root>/<uuid>/history/sessions.jsonl，
+        # 这里汇总全部会话的台账再聚合（旧实现读 <runs_root>/history 那个不存在的共享文件）。
+        ledger_points = _ledger_trend(_ledger_records(settings), field, period)
         return Response.json({
             "field": field, "period": period,
             "points": jsonable(points),
@@ -857,6 +962,9 @@ def build_router(settings: Settings) -> Router:
     # ------------------------------------------------------------ 总览
     @router.get(r"/api/overview")
     def overview(request: Request) -> Response:
+        # 首页是界面里最常轮询的读接口：在这里顺带回收已结束会话遗留的实时信号 feed，
+        # 这样"开过实时监测又结束了的会话"不会永久占着注册表条目与对象。
+        sweep_signal_feeds()
         with store.read_only(db_path) as conn:
             payload = repo.overview(conn)
             rows, _ = repo.list_sessions(conn, limit=8, offset=0)
@@ -909,6 +1017,53 @@ def _reason_counts(rejected) -> dict:
         if reason:
             counts[reason] = counts.get(reason, 0) + 1
     return counts
+
+
+def _ledger_records(settings: Settings) -> list:
+    """汇总 JSONL 台账记录（按会话去重）。
+
+    运行时把台账写在**每个会话自己的目录**：`<runs_root>/<uuid>/history/sessions.jsonl`
+    （见 `core/runtime.py` 的 `runs_root` 属性与 README「数据目录」一节），
+    而 `export-ledger`（`--rebuild-ledger`）重放到 `<data_dir>/history/sessions.jsonl`。
+    两个位置都要读：只读 `<runs_root>/history/sessions.jsonl` 会永远拿到空数组，
+    于是 `/api/reports/trend` 的 `ledger_points` 恒为空。
+    """
+    roots = [path.parent.parent
+             for path in sorted(Path(settings.runs_root).glob("*/history/sessions.jsonl"))]
+    shared = Path(settings.data_dir) / "history" / "sessions.jsonl"
+    if shared.exists():
+        roots.append(shared.parent.parent)
+    records: list = []
+    seen: set = set()
+    for root in roots:
+        for record in paired_ledger.read_history(root):
+            key = record.get("session_uuid") or (
+                record.get("participant"), record.get("session"), record.get("run"),
+                record.get("recorded_at"))
+            if key in seen:                       # 重放过的台账会与按会话台账重合
+                continue
+            seen.add(key)
+            records.append(record)
+    return records
+
+
+def _ledger_trend(records, field: str, period: str) -> list:
+    """把台账记录聚合成趋势点（与 `paired_ledger.trend_points` 同一口径）。"""
+    if not records:
+        return []
+    from ningsi.monitoring import history as history_module
+
+    try:
+        reference = records[-1]
+        usable, rejected = history_module.comparable(
+            records, reference.get("device"), reference.get("srate"), reference.get("channels"))
+        points = history_module.aggregate(usable, field, period)
+    except Exception as exc:  # noqa: BLE001 - 聚合失败不应让接口 500
+        LOGGER.warning("台账趋势聚合失败：%s", exc)
+        return []
+    for point in points:
+        point["rejected"] = len(rejected)
+    return jsonable(points)
 
 
 def _rebuild_sart(row):
@@ -1025,5 +1180,5 @@ def _openapi_spec() -> dict:
     }
 
 
-__all__ = ["build_router", "session_public", "API_TITLE", "API_VERSION",
+__all__ = ["build_router", "session_public", "StudioSessionManager", "API_TITLE", "API_VERSION",
            "dump", "ApiError", "Response"]

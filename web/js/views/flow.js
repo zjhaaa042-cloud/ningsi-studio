@@ -19,7 +19,7 @@ import { describeError, toast } from '../store.js';
 import { connectSessionEvents } from '../sse.js';
 import {
   DASH, button, card, el, empty, fmtDuration, fmtInt, fmtNum, fmtPercent, fmtSeconds,
-  fmtTime, list, phaseStateText, pick, statusText, table,
+  fmtTime, list, phaseStateText, phaseText, pick, statusText, table,
 } from '../util.js';
 import { drawAlertTimeline, drawWaveform } from '../charts.js';
 
@@ -99,6 +99,7 @@ export function render(container, ctx) {
   const noticeHost = el('div');
   const phaseHost = el('div');
   const interactionHost = el('div');
+  const scaleSummaryHost = el('div');
   const tailHost = el('div');
 
   container.append(head);
@@ -109,6 +110,7 @@ export function render(container, ctx) {
     sub: '等待 / 进行中 / 完成由 SSE 的 phase 事件驱动；快速模式下交互阶段由后端自动作答',
   }));
   container.append(interactionHost);
+  container.append(scaleSummaryHost);
   container.append(tailHost);
 
   /* ---------------------------------------------------------- 本地状态 */
@@ -118,6 +120,7 @@ export function render(container, ctx) {
     phaseState: new Map(),          // key → { label, state, progress }
     phaseOrder: PHASE_FALLBACK.slice(),
     scales: new Map(),              // code → 已渲染的作答区状态
+    scaleResults: new Map(),        // code → 后端计分结果（用于"量表计分汇总"卡）
     trial: null,                    // { task, phase, index, digit, total, keyReady, answer }
     finished: false,
     notices: [],
@@ -261,7 +264,8 @@ export function render(container, ctx) {
     const session = ctx.store.state.currentSession;
     const progress = pick(session, 'progress', 0);
     const phase = pick(session, 'phase', null);
-    const label = pick(session, 'phase_label', null) || phase || DASH;
+    // 详情接口对终态会话会把 phase_label 退化成原始键，统一交给 phaseText 处理
+    const label = phaseText(phase, pick(session, 'phase_label', null));
     const bar = el('div', { class: 'progress' }, [
       el('div', { class: 'progress__bar', style: `width:${(Math.max(0, Math.min(1, Number(progress) || 0)) * 100).toFixed(1)}%` }),
     ]);
@@ -357,6 +361,40 @@ export function render(container, ctx) {
   };
 
   /* ------------------------------------------------------ 量表作答区 */
+  /**
+   * 量表计分结果（code → scored）。
+   * 来源有二：SSE 的 `scales`（{results:[...]}，一次补齐全量表）与 `scale_scored`（单量表），
+   * 已结束的会话不会再发这两类事件，所以加载时还会用 GET /report 的 `scales` 兜底。
+   */
+  const mergeScaleResults = (rows) => {
+    for (const row of list(rows)) {
+      if (!row || !row.code) continue;
+      local.scaleResults.set(row.code, { ...(local.scaleResults.get(row.code) || {}), ...row });
+    }
+  };
+
+  const renderScaleSummary = () => {
+    scaleSummaryHost.textContent = '';
+    const rows = [...local.scaleResults.values()];
+    if (!rows.length) return;
+    rows.sort((a, b) => String(a.code).localeCompare(String(b.code)));
+    // 用紧凑的一行一量表（而不是表格）：内容不丢，但不让流程视图被这张"汇总卡"撑高
+    scaleSummaryHost.append(card('量表计分汇总', el('div', { class: 'stack' }, [
+      ...rows.map((row) => el('p', {
+        class: 'mono',
+        text: [
+          `${row.code || DASH}${row.name ? `（${row.name}）` : ''}`,
+          `版本 ${row.version || DASH}`,
+          `原始分 ${fmtInt(row.raw_score)}`,
+          `标准分 ${fmtInt(row.standard_score)}`,
+          `${row.level || DASH}`,
+          row.answered === undefined ? null : `已答 ${fmtInt(row.answered)} 题`,
+        ].filter(Boolean).join('｜'),
+      })),
+      el('p', { class: 'muted', text: '量表结果仅用于研究与自我调节参考，不构成医学诊断。' }),
+    ]), { sub: '计分由后端完成（来源：scale_scored / scales 事件，或已结束会话的报告接口）' }));
+  };
+
   const ensureScaleSlot = (code, label, size, instruction) => {
     let slot = local.scales.get(code);
     if (slot) return slot;
@@ -662,6 +700,13 @@ export function render(container, ctx) {
         ])));
         break;
       }
+      case 'scales': {
+        // 后端 core/runtime.py:374 发的是 {results:[scored, ...]}：
+        // 每个 scored 含 code/name/version/raw_score/standard_score/level/responses
+        mergeScaleResults(list(payload.results));
+        renderScaleSummary();
+        break;
+      }
       case 'scale_request': {
         ensureScaleSlot(payload.code, payload.label, payload.size, payload.instruction);
         break;
@@ -674,6 +719,8 @@ export function render(container, ctx) {
             text: `计分完成：粗分 ${fmtInt(payload.raw_score)}，标准分 ${fmtInt(payload.standard_score)}，${payload.level || DASH}`,
           }));
         }
+        mergeScaleResults([payload]);
+        renderScaleSummary();
         break;
       }
       case 'behavior_request': {
@@ -922,18 +969,39 @@ export function render(container, ctx) {
       alerts: list(pick(data, 'alerts', [])),
     });
     // 非运行中的会话：SSE 只会补发 phase + finished 快照，这里先把阶段状态按 runs 还原
+    const sessionProgress = Number.isFinite(Number(data.progress)) ? Number(data.progress) : null;
     for (const run of list(pick(data, 'runs', []))) {
       if (!run || !run.phase) continue;
+      // runs 表本身没有 progress 列（routes.py / schema.sql 确认，前端拿到的 payload 也已解码），所以：
+      // 1) 先看该 run 自己的 payload.progress；2) 只有"会话当前阶段"能借用会话级 progress（data.progress）；
+      // 3) 其余阶段保持 null，绝不编造进度。
+      const runPayload = pick(run, 'payload', {}) || {};
+      const rawProgress = pick(runPayload, 'progress', null);
+      const progress = (rawProgress === null || rawProgress === undefined)
+        ? (run.phase === data.phase ? sessionProgress : null)
+        : rawProgress;
       local.phaseState.set(run.phase, {
         state: run.status === 'running' ? 'running' : run.status === 'done' ? 'done' : (run.status || 'pending'),
-        progress: null,
+        progress,
       });
     }
     refresh();
+    // 已结束/非运行中的会话不会再发 scales / scale_scored：用报告接口的量表结果兜底，
+    // 否则"量表计分汇总"卡在复盘时会永远是空的
+    if (data.status && data.status !== 'running') {
+      api.report(uuid).then((reportResponse) => {
+        if (ctx.signal.aborted) return;
+        const scales = pick(reportResponse.data, 'scales', {}) || {};
+        const rows = Array.isArray(scales) ? scales : Object.values(scales);
+        if (!rows.length) return;
+        mergeScaleResults(rows.map((row) => pick(row, 'result', row)));
+        renderScaleSummary();
+      }).catch(() => { /* 报告不可用时不阻塞流程视图 */ });
+    }
     if (data.status && data.status !== 'running') {
       tailHost.textContent = '';
       tailHost.append(card('会话当前状态', el('div', {}, [
-        el('p', { text: `${statusText(data.status)}｜阶段 ${data.phase_label || data.phase || DASH}` }),
+        el('p', { text: `${statusText(data.status)}｜阶段 ${phaseText(data.phase, data.phase_label)}` }),
         el('div', { class: 'row' }, [
           button('查看报告', () => ctx.navigate(`#/report?session=${uuid}`)),
           button('历史会话', () => ctx.navigate('#/history')),

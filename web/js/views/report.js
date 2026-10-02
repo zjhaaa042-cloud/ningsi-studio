@@ -145,8 +145,8 @@ function composeMarkdown(report, config) {
   return lines.join('\n');
 }
 
-/** 评估未完成时的进度展示。 */
-function renderPartial(host, data) {
+/** 评估未完成时的进度展示。ctx 用于"刷新报告"——重建当前视图即可重新请求，不再整页刷新。 */
+function renderPartial(host, data, ctx) {
   const bar = el('div', { class: 'progress' }, [
     el('div', {
       class: 'progress__bar',
@@ -160,7 +160,7 @@ function renderPartial(host, data) {
       el('span', { class: 'mono', text: fmtPercent(pick(data, 'progress')) }),
     ]),
     bar,
-    button('刷新报告', () => window.location.reload()),
+    button('刷新报告', () => (ctx && ctx.reload ? ctx.reload() : window.location.reload())),
   ]), { sub: '接口返回 202 + partial: true 属于正常状态，不是错误' }));
 
   const runs = list(pick(data, 'runs', []));
@@ -221,7 +221,7 @@ export async function render(container, ctx) {
     if (ctx.signal.aborted) return;
     const data = response.data;
     if (response.status === 202 || (data && data.partial === true)) {
-      renderPartial(host, data || {});
+      renderPartial(host, data || {}, ctx);
     } else if (typeof data === 'string') {
       host.append(card('评估报告', renderMarkdown(data)));
     } else {

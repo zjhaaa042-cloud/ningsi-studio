@@ -1,7 +1,9 @@
 """会话接口：创建（201 与字段）/ 非法 time_scale(422) / 列表过滤 / 详情（runs+alerts）/
-取消非运行会话(409) / 并发上限(429) / 产物下载响应头。"""
+取消非运行会话(409) / 并发上限(429) / 产物下载响应头 / 模型训练与台账趋势。"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 try:                                              # 支持直接以脚本方式运行本文件
     from tests.helpers import PHASE_KEYS, QUICK_TIME_SCALE, StudioTestCase
@@ -12,6 +14,7 @@ except ModuleNotFoundError:                       # pragma: no cover - 仅脚本
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from tests.helpers import PHASE_KEYS, QUICK_TIME_SCALE, StudioTestCase
 
+from ningsi import config
 from ningsi_studio import bootstrap
 
 
@@ -112,6 +115,45 @@ class SessionListTests(StudioTestCase):
     def test_list_sessions_invalid_participant_returns_422(self) -> None:
         self.assert_error(self.get("/api/sessions?participant=!!"), 422, "validation_failed",
                           "非法被试编号过滤应返回 422")
+
+    def test_list_sessions_carries_phase_label(self) -> None:
+        """列表页也要中文阶段名：详情接口有 phase_label，列表曾只回英文键。
+
+        已知流程阶段必须给出中文名（与 core/phases.py 同表）；终态 done/error 不是流程阶段，
+        回 None，由界面本地化（前端 phaseText 兜底）。
+        """
+        self.create_session("m13", time_scale=1.0)
+
+        running = self.json_body(self.get("/api/sessions?participant=m13&status=running"), 200,
+                                 "按状态过滤应返回 200")
+        self.assertTrue(running["items"], "应命中运行中的会话")
+        item = running["items"][0]
+        self.assertIn("phase_label", item, "列表项应含 phase_label")
+        self.assertNotEqual(item["phase_label"], item["phase"],
+                            "进行中的阶段应给中文名，而不是回显英文键")
+        self.assertRegex(item["phase_label"], r"[\u4e00-\u9fff]",
+                         "phase_label 应是中文，实际：" + repr(item["phase_label"]))
+
+    def test_detail_runtime_source_kind_survives_session_end(self) -> None:
+        """会话结束后运行器可能被回收，source_kind 仍须可判（否则"仿真"标注消失）。
+
+        反推只按命名约定：`lsl:` ⇒ lsl，仿真源键 ⇒ sim，其它为 None（不猜）。
+        """
+        from ningsi_studio.api import routes
+        from ningsi_studio.core import live_source
+
+        self.assertEqual(routes._source_kind_from_key(live_source.SIM_SOURCE), "sim")
+        self.assertEqual(routes._source_kind_from_key("lsl:my-stream"), "lsl")
+        self.assertIsNone(routes._source_kind_from_key(None))
+        self.assertIsNone(routes._source_kind_from_key("weird"))
+
+        session = self.create_session("m14", time_scale=0.05)
+        self.cancel_session_via_api(session["uuid"])
+        detail = self.wait_session_done(session["uuid"], timeout=30.0,
+                                        expect=("cancelled", "failed", "done"))
+        self.assertEqual(detail["runtime"]["source"], "sim-bsense", "结束的仿真会话仍应标明实际数据源")
+        self.assertEqual(detail["runtime"]["source_kind"], "sim",
+                         "source_kind 不能因为会话结束就变 null（顶栏会丢掉「仿真」标注）")
 
 
 class SessionDetailTests(StudioTestCase):
@@ -257,6 +299,51 @@ class ArtifactDownloadTests(StudioTestCase):
 
         self.assert_error(self.get(f"/api/sessions/{uuid}/artifacts/unknown_kind"),
                           404, "not_found", "未知产物应返回 404")
+
+
+class ModelAndTrendTests(StudioTestCase):
+    """模型训练接口与跨会话趋势的 JSONL 台账（`ledger_points`）。"""
+
+    port_base = 18932
+
+    def test_train_model_returns_metrics_and_saves(self) -> None:
+        payload = self.json_body(self.post("/api/models/train",
+                                           {"subjects": 3, "windows_per_state": 2}),
+                                 200, "模型训练接口应返回 200")
+        for key in ("spec", "version", "features", "subject_split", "samples", "participants",
+                    "train", "validation", "test", "model_path"):
+            self.assertIn(key, payload, f"训练结果应含 {key}")
+        self.assertEqual(payload["version"], config.VERSION,
+                         "version 应来自引擎 config.VERSION")
+        self.assertEqual(len(payload["participants"]), 3, "3 个仿真被试应全部记入 participants")
+        self.assertEqual(payload["samples"], 3 * 2 * 2,
+                         "样本数应为 被试数 × 状态数(2) × 每状态窗数")
+        self.assertTrue(payload["features"], "应给出特征名列表")
+        self.assertIsInstance(payload["train"], dict, "train 应为评估对象")
+        self.assertTrue(Path(payload["model_path"]).exists(),
+                        f"模型文件应落盘：{payload['model_path']}")
+
+    def test_reports_trend_reads_jsonl_ledger(self) -> None:
+        """台账按会话写在 runs/<uuid>/history/sessions.jsonl，`ledger_points` 不能恒为空。"""
+        participant = self.create_subject(auto_id=True, label="台账被试")["public_id"]
+        session = self.create_session(participant)
+        uuid = session["uuid"]
+        detail = self.wait_session_done(uuid)
+        self.assertEqual(detail["status"], "done", "快速演示会话应正常结束")
+
+        ledger = Path(self.data_dir) / "runs" / uuid / "history" / "sessions.jsonl"
+        self.assertTrue(ledger.exists(), f"每个会话应写一份台账：{ledger}")
+
+        trend = self.json_body(self.get("/api/reports/trend?field=focus&period=week"), 200,
+                               "跨会话趋势应返回 200")
+        self.assertIsInstance(trend["ledger_points"], list, "ledger_points 应为数组")
+        self.assertTrue(trend["ledger_points"],
+                        "台账在 runs/<uuid>/history/sessions.jsonl，ledger_points 不应为空")
+        for point in trend["ledger_points"]:
+            for key in ("period", "mean", "n", "std", "rejected"):
+                self.assertIn(key, point, f"台账趋势点应含 {key}")
+        self.assertEqual(sum(point["n"] for point in trend["ledger_points"]), 1,
+                         "本用例只有一次完成会话，台账聚合的 n 应为 1（条数与记录数一致）")
 
 
 if __name__ == "__main__":                        # pragma: no cover - 便于单文件调试

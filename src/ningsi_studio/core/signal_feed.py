@@ -314,6 +314,25 @@ class SignalFeedRegistry:
         if feed is not None:
             feed.stop()
 
+    def sweep(self, is_live: Callable[[str], bool]) -> int:
+        """回收「会话已结束且没有订阅者」的 feed，返回回收条数。
+
+        `is_live(uuid)` 由调用方给出**运行器的实际存活状态**（不能用库里的 status：
+        刚 done 但线程还在收尾时按库判会误清正在推流的 feed）。
+
+        幂等且可重入：只处理 `subscriber_count == 0` 的条目，正在推流的 feed 不会被关掉；
+        并发的新订阅者进来时该条目的订阅数已不为 0，本轮就不会被回收。
+        """
+        with self._lock:
+            stale = [session_uuid for session_uuid, feed in self._feeds.items()
+                     if feed.subscriber_count == 0 and not is_live(session_uuid)]
+            feeds = [self._feeds.pop(session_uuid) for session_uuid in stale]
+        for feed in feeds:
+            feed.stop()
+        if stale:
+            LOGGER.info("回收实时信号 feed：%s", [session_uuid[:8] for session_uuid in stale])
+        return len(stale)
+
     def stop_all(self) -> None:
         with self._lock:
             feeds = list(self._feeds.values())
