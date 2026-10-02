@@ -828,7 +828,10 @@ class SessionRuntime:
                 repo.update_session(conn, self.uuid, status=status,
                                     ended_at=store.utcnow(), error=error,
                                     progress=1.0 if status == "done" else 0.0,
-                                    phase="done" if status == "done" else "error")
+                                    # 终态如实入 phase：done/failed/cancelled。曾经把非 done
+                                    # 一律写成 "error"，于是取消的会话出现「状态=已取消 /
+                                    # 阶段=失败」自相矛盾（前端 phaseText 把 error 译成「失败」）。
+                                    phase=status)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("会话收尾写库失败：%s", exc)
         try:

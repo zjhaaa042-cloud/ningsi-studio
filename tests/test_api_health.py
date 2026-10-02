@@ -1,6 +1,7 @@
 """基础接口与统一错误体：/api/health、/api/config、/api/devices、/api/openapi.json。
 
-全部通过真实 HTTP 服务访问（urllib），覆盖状态码、字段结构与错误体格式。
+全部通过真实 HTTP 服务访问（urllib），覆盖状态码、字段结构与错误体格式；
+另含列表类响应的统一信封（`/api/scales`）与 `--token` 只保护 `/api` 的鉴权语义。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ except ModuleNotFoundError:                       # pragma: no cover - 仅脚本
 from ningsi import config
 from ningsi_studio import bootstrap
 from ningsi_studio.api.routes import API_TITLE, API_VERSION
+from ningsi_studio.settings import Settings
 
 
 class HealthTests(StudioTestCase):
@@ -321,6 +323,90 @@ class ErrorBodyTests(StudioTestCase):
         error = self.assert_error(self.get(f"/api/sessions/{unknown}/heatmap"), 404, "not_found",
                                   "未知会话的热力图应返回 404")
         self.assertIn("会话不存在", error["message"], "子路径应命中 /heatmap 而不是详情接口")
+
+
+class CollectionEnvelopeTests(StudioTestCase):
+    """列表类响应的统一信封 `{items,total,limit,page}`：`/api/scales` 是纯目录端点，
+    最容易验证"信封字段齐全 + 真分页"（产物清单在 test_sessions_api 里用真实会话验证）。
+    """
+
+    port_base = 18918
+
+    def test_scale_catalog_has_collection_envelope(self) -> None:
+        payload = self.json_body(self.get("/api/scales"), 200, "量表目录应返回 200")
+        self.assertEqual(set(payload), {"items", "total", "limit", "page"},
+                         "量表目录应返回列表类响应的统一信封（见 docs/API.md 分页约定）")
+        self.assertEqual(payload["total"], len(payload["items"]),
+                         "total 应与本页 items 一致（目录只有一页）")
+        self.assertEqual(payload["total"], 2, "目录应含 SAS/SDS 两套量表")
+        self.assertEqual({item["code"] for item in payload["items"]}, {"SAS", "SDS"},
+                         "目录项应为 SAS 与 SDS")
+        self.assertEqual(payload["limit"], 50, "默认 limit 应为 50")
+        self.assertEqual(payload["page"], 1, "page 应从 1 开始")
+
+    def test_scale_catalog_honours_pagination_params(self) -> None:
+        first = self.json_body(self.get("/api/scales?limit=1&page=1"), 200, "第 1 页应返回 200")
+        second = self.json_body(self.get("/api/scales?limit=1&page=2"), 200, "第 2 页应返回 200")
+        self.assertEqual((first["total"], second["total"]), (2, 2),
+                         "两页的 total 应都指向目录总数 2（不是本页条数）")
+        self.assertEqual((first["limit"], second["limit"]), (1, 1), "limit 应回显请求值")
+        self.assertEqual((first["page"], second["page"]), (1, 2), "page 应回显请求页")
+        self.assertEqual((len(first["items"]), len(second["items"])), (1, 1),
+                         "limit=1 时每页只应返回 1 条")
+        self.assertNotEqual(first["items"][0]["code"], second["items"][0]["code"],
+                            "第 2 页应是不同的量表，而不是重复第 1 页")
+
+        beyond = self.json_body(self.get("/api/scales?limit=1&page=3"), 200,
+                                "超出范围的页应返回 200 与空 items")
+        self.assertEqual(beyond["items"], [], "超出范围的页 items 应为空")
+        self.assertEqual(beyond["total"], 2, "超出范围的页仍应回报 total=2")
+
+
+class TokenAuthTests(StudioTestCase):
+    """`--token`（`api_token` 非空）只保护 `/api`：静态资源放行，缺令牌返回 unauthorized。
+
+    用 `make_settings` 注入令牌（基类的扩展点），不改 helpers。
+    """
+
+    port_base = 18990
+    api_token = "test-token-2f7c"
+
+    @classmethod
+    def make_settings(cls, data_dir) -> Settings:
+        settings = super().make_settings(data_dir)
+        settings.api_token = cls.api_token
+        return settings
+
+    def setUp(self) -> None:
+        # 基类 setUp 会调 /api 清运行中会话（不带令牌必然 401），本类不建会话，跳过即可。
+        pass
+
+    def test_api_requests_need_token(self) -> None:
+        missing = self.assert_error(self.get("/api/health"), 401, "unauthorized",
+                                   "配置令牌后未带令牌的 /api 请求应返回 401 unauthorized")
+        self.assertIn("Token", missing["message"], "401 消息应说明令牌问题")
+
+        self.assert_error(self.get("/api/health?token=wrong"), 401, "unauthorized",
+                          "查询参数带错令牌应返回 401")
+        self.assert_error(self.get("/api/health", headers={"X-API-Token": "wrong"}), 401,
+                          "unauthorized", "请求头带错令牌应返回 401")
+
+        header = self.json_body(self.get("/api/health", headers={"X-API-Token": self.api_token}),
+                                200, "带 X-API-Token 请求头应放行")
+        self.assertEqual(header["status"], "ok", "带正确令牌应拿到正常健康检查结果")
+        query = self.json_body(self.get(f"/api/health?token={self.api_token}"), 200,
+                               "带 ?token= 查询参数应放行")
+        self.assertEqual(query["service"], "ningsi-studio", "两种给法应返回同一份数据")
+
+    def test_static_resources_ignore_token(self) -> None:
+        index = self.assert_status(self.get("/index.html"), 200,
+                                   "带 --token 时静态入口仍应返回 200（否则 SPA 永远 boot 不起来）")
+        self.assertIn("text/html", index.content_type, "index.html 应为 HTML")
+        self.assert_status(self.get("/"), 200, "SPA 根路径不应被令牌拦截")
+        self.assert_status(self.get("/js/api.js"), 200, "前端脚本不应被令牌拦截")
+
+        # SPA 回退路径同样放行（未知非 /api 路径交给前端路由）
+        self.assert_status(self.get("/history"), 200, "SPA 回退路径不应被令牌拦截")
 
 
 if __name__ == "__main__":                        # pragma: no cover - 便于单文件调试

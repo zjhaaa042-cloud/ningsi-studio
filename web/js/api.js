@@ -11,21 +11,54 @@ const DEFAULT_TIMEOUT = 15000;
 
 /**
  * 可选令牌：后端用 `--token` 启动时所有 /api 都需要 `X-API-Token`。
- * 令牌由后端注入到 index.html 的 meta 标签；未注入时为空，不影响默认（无令牌）部署。
+ * 令牌来源有二（按优先级）：
+ * 1) index.html 的 `<meta name="ningsi-api-token">`（部署时注入，默认空）；
+ * 2) 当前地址的 `?token=...`（docs/API.md 336 行给出的另一种方式，也方便人工排查）。
+ * 第 2 种命中的令牌缓存到模块内存，避免同一次会话里每请求都解析一遍地址。
  */
+let urlToken = '';
+
 function apiToken() {
   const node = document.querySelector('meta[name="ningsi-api-token"]');
-  return node ? (node.getAttribute('content') || '').trim() : '';
+  const meta = node ? (node.getAttribute('content') || '').trim() : '';
+  if (meta) return meta;
+  if (!urlToken) {
+    try {
+      urlToken = (new URLSearchParams(window.location.search).get('token') || '').trim();
+    } catch (error) {
+      urlToken = '';
+    }
+  }
+  return urlToken;
+}
+
+/** 401/403 的统一可读文案：告诉使用者"令牌该怎么给"，并保留后端 message 供追溯。 */
+const TOKEN_HINT = '服务开启了访问令牌（--token）：请在地址后加 ?token=你的令牌，或联系管理员。';
+
+function unauthorizedError(response, payload, path) {
+  const info = (payload && payload.error) || {};
+  const reason = info.message ? `服务端返回：${info.message}` : `接口返回 ${response.status}`;
+  return new ApiError(`${TOKEN_HINT}（${reason}）`, {
+    status: response.status,
+    code: info.code || (response.status === 403 ? 'forbidden' : 'unauthorized'),
+    detail: info.detail || null,
+    payload,
+    tokenIssue: true,
+    path,
+  });
 }
 
 export class ApiError extends Error {
-  constructor(message, { status = 0, code = '', detail = null, payload = null } = {}) {
+  constructor(message, { status = 0, code = '', detail = null, payload = null, tokenIssue = false, path = '' } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.detail = detail;
     this.payload = payload;
+    /** 是否为"访问令牌缺失/错误"类失败（401/403）：视图据此显示空态而不是当成业务 404。 */
+    this.tokenIssue = tokenIssue;
+    this.path = path;
   }
 
   /** 便于视图区分"正常业务分支"（如 404 未生成、409 未到阶段）与真实故障。 */
@@ -85,12 +118,17 @@ async function request(method, path, { body, params, timeout = DEFAULT_TIMEOUT, 
   }
 
   if (!response.ok) {
+    // 令牌类失败单独聚合：401/403 只弹一句后端原文，使用者不知道该做什么（task-5 口径）。
+    if (response.status === 401 || response.status === 403) {
+      throw unauthorizedError(response, payload, path);
+    }
     const info = (payload && payload.error) || {};
     throw new ApiError(info.message || `接口返回 ${response.status}`, {
       status: response.status,
       code: info.code || 'internal_error',
       detail: info.detail || null,
       payload,
+      path,
     });
   }
   return { status: response.status, data: payload };

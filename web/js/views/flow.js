@@ -113,6 +113,154 @@ export function render(container, ctx) {
   container.append(scaleSummaryHost);
   container.append(tailHost);
 
+  /* ---------------------------------------------------- 页面密度（压高） */
+  /* 为什么压：`#/flow` 要在 1600×1000 的演示窗口里一屏看全，原来"全部阶段"每项一行、
+     量表作答区每题的 4 个选项竖排，整页会到 2000~4200px。
+     为什么只用内联样式：`web/css/app.css` 不在本次改动范围（task-5 硬约束），
+     所以这里压的是"密度"（字号/行距/padding/gap），不动主题色、不动 DOM 结构、不删任何信息项。
+     为什么用 MutationObserver 而不是在首屏贴一次：flow.js 每个 ticker（每秒 renderStep）、
+     展开阶段、量表作答区、尾部卡片都会重建节点，贴一次的样式下一秒就被新节点覆盖；
+     观察 childList/subtree 不会因为"我们在回调里改 style"再次触发，所以不会自激。 */
+  const tighten = () => {
+    // 1) 卡片留白与标题层级
+    container.querySelectorAll('.card').forEach((node) => {
+      node.style.padding = '8px 12px';
+      const title = node.querySelector('.card__title');
+      if (title) { title.style.fontSize = '14px'; title.style.marginBottom = '4px'; }
+      const sub = node.querySelector('.card__sub');
+      if (sub) { sub.style.fontSize = '11px'; sub.style.marginTop = '2px'; }
+    });
+    // 2) 进度条 / 次要说明 / 列表间距
+    container.querySelectorAll('.progress').forEach((node) => { node.style.height = '6px'; node.style.margin = '4px 0'; });
+    container.querySelectorAll('p.muted, .muted').forEach((node) => { node.style.fontSize = '12px'; node.style.margin = '2px 0'; });
+    container.querySelectorAll('.stack').forEach((node) => { node.style.gap = '2px'; });
+    container.querySelectorAll('.tag-list').forEach((node) => { node.style.gap = '4px'; });
+    // 3) 全部阶段：11 个阶段改三列网格（信息一项不少，只是不再各占一行）
+    const phaseList = container.querySelector('.phase-list');
+    if (phaseList) {
+      phaseList.style.display = 'grid';
+      phaseList.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+      phaseList.style.gap = '4px 10px';
+      phaseList.style.margin = '0';
+      phaseList.style.padding = '0';
+    }
+    container.querySelectorAll('.phase-item').forEach((item) => {
+      item.style.padding = '3px 6px';
+      item.querySelectorAll('.phase-item__main, .phase-item__main *').forEach((node) => {
+        node.style.fontSize = '11.5px';
+        node.style.lineHeight = '1.25';
+        node.style.margin = '0';
+      });
+      item.querySelectorAll('.right, .right *').forEach((node) => {
+        node.style.fontSize = '11px';
+        node.style.lineHeight = '1.2';
+      });
+    });
+    // 4) 「当前该做什么」：最高的一块，只收紧字号行距间距
+    const step = container.querySelector('.step');
+    if (step) {
+      step.style.fontSize = '13px';
+      step.style.lineHeight = '1.35';
+      const set = (selector, styles) => {
+        const node = step.querySelector(selector);
+        if (node) Object.assign(node.style, styles);
+      };
+      set('.step__head', { marginBottom: '2px' });
+      set('.step__headline', { fontSize: '17px', margin: '2px 0 0' });
+      set('.step__details', { margin: '4px 0 0', paddingLeft: '18px' });
+      step.querySelectorAll('.step__details li').forEach((li) => { li.style.margin = '0'; li.style.lineHeight = '1.3'; });
+      set('.step__meta', { margin: '4px 0 0' });
+      set('.step__auto', { margin: '4px 0 0' });
+      set('.step__next', { margin: '2px 0 0' });
+      set('.step__action', { margin: '6px 0 0' });
+    }
+    const cardByTitle = (pattern) => Array.from(container.querySelectorAll('.card'))
+      .find((node) => pattern.test((node.querySelector('.card__title') || {}).textContent || ''));
+    // 5) 预警时间轴（drawAlertTimeline 生成的 .timeline__item）
+    const alertCard = cardByTitle(/预警时间轴/);
+    if (alertCard) {
+      alertCard.querySelectorAll('.timeline__item').forEach((item) => {
+        item.style.padding = '2px 0';
+        item.style.margin = '0';
+        item.style.minHeight = '0';
+        item.querySelectorAll('*').forEach((node) => {
+          node.style.fontSize = '11.5px';
+          node.style.lineHeight = '1.25';
+          node.style.margin = '0';
+        });
+      });
+      const timeline = alertCard.querySelector('.timeline');
+      if (timeline) { timeline.style.gap = '0'; timeline.style.padding = '0'; }
+    }
+    // 6) 「会话当前状态」
+    const stateCard = cardByTitle(/^会话当前状态$/);
+    if (stateCard) {
+      stateCard.querySelectorAll('*').forEach((node) => {
+        node.style.fontSize = '12px';
+        node.style.lineHeight = '1.35';
+        node.style.margin = '1px 0';
+      });
+      const body = stateCard.querySelector('.card__body');
+      if (body) body.style.padding = '0';
+    }
+    // 7) 顶部标题行
+    const head0 = container.querySelector('.row.row--between');
+    if (head0) {
+      const h1 = head0.querySelector('h1');
+      if (h1) { h1.style.fontSize = '18px'; h1.style.margin = '0'; }
+      head0.style.margin = '0';
+      head0.style.padding = '0 0 4px';
+    }
+    // 8) 「量表计分汇总」每行
+    const summaryCard = cardByTitle(/^量表计分汇总$/);
+    if (summaryCard) {
+      summaryCard.querySelectorAll('p.mono, .mono').forEach((node) => {
+        node.style.fontSize = '12px';
+        node.style.lineHeight = '1.3';
+        node.style.margin = '1px 0';
+      });
+    }
+    // 9) 「会话结束」动作按钮
+    const endCard = cardByTitle(/^会话结束$/);
+    if (endCard) {
+      endCard.querySelectorAll('.btn, button').forEach((btn) => {
+        btn.style.fontSize = '12px';
+        btn.style.padding = '4px 10px';
+      });
+    }
+    // 10) 量表作答区：题干单行 + 4 个选项横排（20 题竖排是本页最高的来源）
+    /* 为什么不删题：20 题 × 4 选项是"必须可见才能作答"的信息；横排后每选项宽 ~330px、
+       高 34px（实测 optH=34 ≥ 32px 可点按下限），题干实测未截断（scrollHeight ≤ clientHeight）。 */
+    container.querySelectorAll('.scale-item').forEach((item) => {
+      item.style.padding = '4px 0';
+      item.style.margin = '0';
+      const text = item.querySelector('.scale-item__text');
+      if (text) { text.style.fontSize = '12.5px'; text.style.lineHeight = '1.25'; text.style.margin = '0'; }
+      const options = item.querySelector('.scale-options');
+      if (options) {
+        options.style.display = 'flex';
+        options.style.flexWrap = 'nowrap';
+        options.style.gap = '6px';
+        options.style.marginTop = '3px';
+      }
+      item.querySelectorAll('.scale-option').forEach((option) => {
+        option.style.flex = '1 1 0';
+        option.style.minHeight = '34px';
+        option.style.padding = '4px 6px';
+        option.style.margin = '0';
+        option.style.display = 'flex';
+        option.style.alignItems = 'center';
+        option.style.justifyContent = 'center';
+        option.style.fontSize = '12px';
+        option.style.lineHeight = '1.2';
+      });
+    });
+  };
+  tighten();
+  const densityObserver = new MutationObserver(() => tighten());
+  densityObserver.observe(container, { childList: true, subtree: true });
+  ctx.onCleanup(() => densityObserver.disconnect());
+
   /* ---------------------------------------------------------- 本地状态 */
   const local = {
     uuid,

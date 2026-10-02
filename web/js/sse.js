@@ -17,12 +17,29 @@ export const EVENT_TYPES = [
 ];
 
 /**
- * EventSource 无法自定义请求头，因此令牌只能走查询参数（后端支持 `?token=`）。
+ * 令牌来源与 `api.js` 的 `apiToken()` **保持同一套顺序**（两处各自实现，行为必须一致）：
+ * 1) index.html 的 `<meta name="ningsi-api-token">`（部署时注入，默认空）；
+ * 2) 当前地址的 `?token=...`（docs/API.md 336 行给出的另一种方式）。
+ * 为什么这里必须也认地址栏：REST 走 `api.js`、事件流走这里，若只认 meta，
+ * 用户按提示用 `?token=` 打开页面时会变成"接口能通、事件流 401"的半通状态。
+ * 第 2 种命中的令牌缓存到模块内存，避免同一次会话里每帧都解析一遍地址。
+ * EventSource 无法自定义请求头，因此令牌只能拼在查询参数上（后端支持 `?token=`）；
  * 未配置令牌时返回空串，URL 不带额外参数。
  */
+let urlToken = '';
+
 function apiToken() {
   const node = document.querySelector('meta[name="ningsi-api-token"]');
-  return node && node.content ? node.content.trim() : '';
+  const meta = node ? (node.getAttribute('content') || '').trim() : '';
+  if (meta) return meta;
+  if (!urlToken) {
+    try {
+      urlToken = (new URLSearchParams(window.location.search).get('token') || '').trim();
+    } catch (error) {
+      urlToken = '';
+    }
+  }
+  return urlToken;
 }
 
 /**
@@ -43,6 +60,12 @@ export function connectSessionEvents(uuid, options = {}) {
   let closed = false;
 
   const dispatch = (type) => (event) => {
+    // `error` 这个名字被 EventSource **内置**的连接错误事件占用了（与服务端具名 `error`
+    // 事件同名）：内置错误事件没有 `data`，若照常分发，flow.js 会把"连接失败/401"渲染成
+    // 「运行异常：会话运行出错」卡片，把真正的鉴权提示盖掉。传输层错误只由 onerror 上报。
+    if (type === 'error' && (event == null || event.data === undefined || event.data === null || event.data === '')) {
+      return;
+    }
     let payload = {};
     try {
       payload = event.data ? JSON.parse(event.data) : {};

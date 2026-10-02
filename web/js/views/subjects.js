@@ -19,7 +19,7 @@ const SEX_OPTIONS = ['女', '男', '不便告知'];
 const HANDEDNESS_OPTIONS = ['右', '左', '双利手'];
 
 /** 视图内状态：切换被试/刷新时保留（视图卸载即丢弃）。 */
-const view = { publicId: null, query: '' };
+const view = { publicId: null, query: '', editId: null };
 
 function selectInput(id, options, { placeholder = '请选择', value = '' } = {}) {
   const node = el('select', { id });
@@ -88,6 +88,119 @@ function renderSubjectForm(ctx, onCreated) {
     ]),
     el('div', { class: 'row row--end', style: 'margin-top:12px' }, [submit]),
   ]), { sub: '编号留空时由后端按 p01、p02… 自动生成；重复编号会返回 409' });
+}
+
+/**
+ * 被试档案编辑卡（内联表单，随列表页一起渲染）。
+ *
+ * 接口：PATCH /api/subjects/{public_id}（见 src/ningsi_studio/api/routes.py:327-352）
+ * - 可更新字段：label / age_band / sex / handedness / note / consent_version / consent_at；
+ * - 只写"请求里出现过的字段"，所以整表提交即可；清空 → 传空串
+ *   （schemas.optional_text 把 ""/None 写成 null，routes.py:340-344）；
+ * - 编号、创建时间、会话计数只读：PATCH 的 spec 里没有这三个键；
+ * - 后端 409（编号冲突）/422（字段校验、没有可更新字段）都带 message 与 detail，
+ *   这里如实显示，不吞掉。
+ */
+function renderSubjectEdit(ctx, subject, publicId) {
+  const labelInput = el('input', {
+    id: 'edit-subject-label',
+    type: 'text',
+    maxlength: 200,
+    value: pick(subject, 'label', '') || '',
+  });
+  const ageSelect = selectInput('edit-subject-age', AGE_BANDS, { value: pick(subject, 'age_band', '') || '' });
+  const sexSelect = selectInput('edit-subject-sex', SEX_OPTIONS, { value: pick(subject, 'sex', '') || '' });
+  const handSelect = selectInput('edit-subject-hand', HANDEDNESS_OPTIONS, { value: pick(subject, 'handedness', '') || '' });
+  const consentInput = el('input', {
+    id: 'edit-subject-consent',
+    type: 'text',
+    maxlength: 40,
+    value: pick(subject, 'consent_version', '') || '',
+  });
+  const noteInput = el('input', {
+    id: 'edit-subject-note',
+    type: 'text',
+    maxlength: 500,
+    value: pick(subject, 'note', '') || '',
+  });
+  const errorHost = el('div');
+  const save = button('保存修改', null, { primary: true });
+  const cancel = button('取消', () => {
+    view.editId = null;
+    ctx.reload();
+  });
+
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    save.textContent = '保存中…';
+    errorHost.textContent = '';
+    try {
+      const response = await api.patchSubject(publicId, {
+        label: labelInput.value.trim(),
+        age_band: ageSelect.value,
+        sex: sexSelect.value,
+        handedness: handSelect.value,
+        note: noteInput.value.trim(),
+        consent_version: consentInput.value.trim(),
+      });
+      const updated = pick(response.data, 'public_id', publicId);
+      view.editId = null;
+      toast(`已保存被试 sub-${updated} 的档案`, 'info');
+      await ctx.reload();
+      const row = document.querySelector(`#view button[data-subject-id="${updated}"]`);
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    } catch (error) {
+      // 409 / 422 的 detail（例如 allowed 字段列表）一并显示，便于用户知道哪里不合法
+      const detail = error && error.detail ? `（${JSON.stringify(error.detail)}）` : '';
+      errorHost.textContent = '';
+      errorHost.append(el('p', { class: 'empty', text: `${describeError(error)}${detail}` }));
+      toast(describeError(error));
+    } finally {
+      save.disabled = false;
+      save.textContent = '保存修改';
+    }
+  });
+
+  const node = card('编辑被试', el('div', {}, [
+    el('div', { class: 'grid grid--3' }, [
+      el('div', {}, [
+        el('p', { class: 'muted', text: '编号（只读）' }),
+        el('p', { class: 'mono', text: `sub-${pick(subject, 'public_id', publicId)}` }),
+      ]),
+      el('div', {}, [
+        el('p', { class: 'muted', text: '创建时间（只读）' }),
+        el('p', { text: fmtDate(pick(subject, 'created_at')) }),
+      ]),
+      el('div', {}, [
+        el('p', { class: 'muted', text: '会话（完成 / 总数，只读）' }),
+        el('p', { class: 'mono', text: `${fmtInt(pick(subject, 'sessions.done'))} / ${fmtInt(pick(subject, 'sessions.total'))}` }),
+      ]),
+    ]),
+    el('div', { class: 'form-grid', style: 'margin-top:12px' }, [
+      field('别名', labelInput, '清空可移除别名；姓名等直接身份信息不进入报告'),
+      field('年龄段', ageSelect),
+      field('性别', sexSelect),
+      field('利手', handSelect),
+      field('同意版本', consentInput, '例如 consent-v1；改动会写进更新后的档案'),
+      field('备注', noteInput, '最多 500 字'),
+    ]),
+    errorHost,
+    el('div', { class: 'row row--end', style: 'margin-top:12px' }, [cancel, save]),
+  ]), {
+    sub: `PATCH /api/subjects/${publicId}：只提交这张表单里的字段；编号、创建时间、会话计数为只读。按 Esc 或“取消”退出且不提交。`,
+  });
+
+  // Esc 退出且不提交（任务书第 1 条要求）；视图卸载时移除监听，避免残留
+  const onKeydown = (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    view.editId = null;
+    ctx.reload();
+  };
+  document.addEventListener('keydown', onKeydown);
+  ctx.onCleanup(() => document.removeEventListener('keydown', onKeydown));
+
+  return node;
 }
 
 function renderNewSessionPanel(ctx, publicId, options = {}) {
@@ -312,6 +425,22 @@ export async function render(container, ctx) {
     if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
   }));
 
+  // 编辑入口：点列表行里的“编辑”后 view.editId 有值，这里取该被试明细并渲染内联编辑表单。
+  // 用 api.getSubject 而不是列表缓存：搜索结果/分页后目标行可能不在当前页。
+  if (view.editId) {
+    try {
+      const editResponse = await api.getSubject(view.editId);
+      if (ctx.signal.aborted) return;
+      const editNode = renderSubjectEdit(ctx, editResponse.data || {}, view.editId);
+      host.append(editNode);
+      if (editNode.scrollIntoView) editNode.scrollIntoView({ block: 'center' });
+    } catch (error) {
+      host.append(card(`编辑被试 sub-${view.editId}`, [
+        empty(`加载被试信息失败：${describeError(error)}`),
+      ]));
+    }
+  }
+
   // 列表态也能直接开始会话：没有被试时给出明确指引，有被试时可在表单里挑选
   if (items.length) {
     host.append(renderNewSessionPanel(ctx, null, { subjects: items }));
@@ -335,6 +464,7 @@ export async function render(container, ctx) {
             type: 'button',
             text: `sub-${row.public_id}`,
             dataset: { subjectId: row.public_id },
+            attrs: { 'aria-label': `查看被试 sub-${row.public_id} 的会话列表` },
             onClick: () => {
               view.publicId = row.public_id;
               ctx.navigate(`#/subjects?public_id=${encodeURIComponent(row.public_id)}`);
@@ -351,17 +481,36 @@ export async function render(container, ctx) {
         { title: '备注', render: (row) => pick(row, 'note', DASH) || DASH },
         {
           title: '操作',
-          render: (row) => el('button', {
-            class: 'btn btn--sm btn--primary',
-            type: 'button',
-            text: '开始会话',
-            title: '用这位被试开始一次新会话',
-            onClick: () => {
-              view.publicId = row.public_id;
-              ctx.navigate(`#/subjects?public_id=${encodeURIComponent(row.public_id)}`);
-              ctx.reload();
-            },
-          }),
+          render: (row) => el('div', { class: 'row' }, [
+            // 两枚按钮文字都只有两个字，读屏无法区分是哪一行：aria-label 带上被试编号
+            el('button', {
+              class: 'btn btn--sm',
+              type: 'button',
+              text: '编辑',
+              attrs: {
+                title: `编辑被试 sub-${row.public_id} 的档案`,
+                'aria-label': `编辑被试 sub-${row.public_id} 的档案`,
+              },
+              onClick: () => {
+                view.editId = row.public_id;
+                ctx.reload();
+              },
+            }),
+            el('button', {
+              class: 'btn btn--sm btn--primary',
+              type: 'button',
+              text: '开始会话',
+              attrs: {
+                title: '用这位被试开始一次新会话',
+                'aria-label': `用被试 sub-${row.public_id} 开始一次新会话`,
+              },
+              onClick: () => {
+                view.publicId = row.public_id;
+                ctx.navigate(`#/subjects?public_id=${encodeURIComponent(row.public_id)}`);
+                ctx.reload();
+              },
+            }),
+          ]),
         },
       ], items) : empty('还没有被试，先用上方表单创建一个。'),
     ]),

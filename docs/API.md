@@ -15,7 +15,7 @@
 | HTTP | code | 场景 |
 |---|---|---|
 | 400 | bad_request | 请求体不是合法 JSON |
-| 401 | unauthorized | 配置了 `--token` 但请求未带 `X-API-Token` |
+| 401 | unauthorized | 配置了 `--token` 但 `/api` 请求未带（或带错）令牌；静态资源不受影响 |
 | 404 | not_found | 被试/会话/产物不存在 |
 | 405 | internal_error→405 | 方法不被支持（响应带 `detail.allow`） |
 | 409 | conflict | 状态冲突：会话不在运行、任务未到该阶段、编号重复 |
@@ -72,6 +72,10 @@
                  "note": "真实 LSL 流：ningsi-sim-eeg（1 通道，250 Hz，标签 ['Fp1']）" } ],
   "sources": [ { "key": "sim-bsense", "kind": "sim" } ] }
 ```
+上例是 **LSL 源**的形状：`live`、`seconds_since_last`、`observed_srate`、`buffered_samples`、`total_samples`、
+`stream_errors`、`descriptor` 这些**活体字段只有 LSL 源才有**（引擎能自查流状态）；仿真源
+（`kind: "sim"`）只给 `session`/`key`/`kind`/`device`/`srate`/`channels`/`note`/`live`（`live` 恒为 `true`，
+其余字段直接缺失，前端按「—」显示，不是 0）。
 `live=false` 且 `seconds_since_last` 持续变大，说明设备已停/线掉了：此时会话会把窗判为不可用
 （界面上显示为缺失色块），不会拿旧数据继续算指标。
 
@@ -81,6 +85,8 @@
 
 ### `GET /api/sessions` 与列表类响应的分页约定
 `{"items": [...], "total": N, "limit": L, "page": P}`；`page` 从 1 开始，`limit` 上限 200。
+会话、被试、被试的会话列表、`/api/scales`、`/api/sessions/{uuid}/artifacts` 全部遵守该信封，
+并都接受 `?page=&limit=`（默认 `limit=50&page=1`）。
 
 ---
 
@@ -144,7 +150,9 @@
 
 ### `GET /api/sessions?participant=p01&status=done&page=1&limit=50`
 `items[]` 为会话对象，额外含 `alert_count` 与 `phase_label`（已知阶段的**中文名**，与详情接口同一张
-`core/phases.py` 映射表；终态 `done`/`error`/`cancelled` 不是流程阶段，此字段为 `null`，由界面本地化）。
+`core/phases.py` 映射表；终态 `done`/`failed`/`cancelled` 不是流程阶段，此字段为 `null`，由界面本地化）。
+`phase` 运行中是流程阶段键（`qc`/`baseline`/`scale`/…），会话收尾后写的**就是终态本身**
+（`done`/`failed`/`cancelled`，与 `status` 一致），所以取消掉的会话是「已取消」而不是「失败」。
 
 ### `GET /api/sessions/{uuid}`
 会话对象 + `alerts`、`runs`（每阶段一行：`phase/status/duration_ms/error/payload`；`payload` 已解析为
@@ -252,8 +260,9 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 
 ## 量表
 
-- `GET /api/scales` → `{ "items": [{ "code": "SAS", "name": "焦虑自评量表", "size": 20,
-  "version": "zung-cn-v1", "estimate_minutes": 5 }] }`
+- `GET /api/scales?page=1&limit=50` → `{ "items": [{ "code": "SAS", "name": "焦虑自评量表", "size": 20,
+  "version": "zung-cn-v1", "estimate_minutes": 5 }], "total": 2, "limit": 50, "page": 1 }`
+  （目录目前固定 SAS/SDS 两套；信封与分页参数见「列表类响应的分页约定」）
 - `GET /api/scales/{code}`（`code` 取 `SAS` 或 `SDS`）→ `code, name, version, factor, size, options[{value,text}]`,
   `items[{index,text,reverse}]`, `reverse_items[]`, `standard_factor`, `boundaries`, `note`
 - `POST /api/sessions/{uuid}/scales/{code}`
@@ -311,7 +320,10 @@ lapse_rate, false_starts, valid`。
 - `GET /api/sessions/{uuid}/report` → 报告 JSON（`spec/participant/indicators/quality/scales/
   behavior/assessment/extras`），并附 `report_markdown`（报告原文，Markdown 文本）与
   `report_markdown_path`；尚未生成时返回 `202` 且带 `partial: true` 与阶段进度。
-- `GET /api/sessions/{uuid}/artifacts` → `{ "items": [{ kind, path, bytes, sha256, exists, download }] }`
+- `GET /api/sessions/{uuid}/artifacts?page=1&limit=50`
+  → `{ "items": [{ kind, path, bytes, sha256, exists, download }], "total": 7, "limit": 50, "page": 1 }`
+  同一信封与分页参数；单会话产物通常不足 10 条（`report_md/report_json/heatmap_svg/trend_svg/
+  model/history/zip` 的子集），默认一页即可取全，`total` 为登记到 `artifacts` 表的产物总数。
 - `GET /api/sessions/{uuid}/artifacts/{kind}` → 文件下载（`report_md/report_json/heatmap_svg/
   trend_svg/model/history/zip`），带 `Content-Disposition`。
 - `GET /api/sessions/{uuid}/export.zip` → 打包全部产物 + `manifest.json`（含 sha256）。
@@ -333,10 +345,14 @@ lapse_rate, false_starts, valid`。
 
 ## 认证（可选）
 
-以 `serve --token <字符串>` 启动后，所有 `/api` 请求都必须带令牌，两种方式任选：
+以 `serve --token <字符串>` 启动后，**只有 `/api` 请求**必须带令牌，两种方式任选：
 
 - 请求头 `X-API-Token: <字符串>`（前端 `fetch` 用这种）；
 - 查询参数 `?token=<字符串>`（`EventSource` 无法自定义请求头时用这种，SSE 订阅即靠它）。
+
+**静态资源（`/`、`/index.html`、`/js/*`、`/css/*` 与 SPA 回退路径）不受令牌约束**：页面本身不含数据，
+令牌是接口访问控制；否则带 `--token` 启动时连 SPA 入口都拿不到，页面无法 boot。缺少或错误的令牌返回
+`401` + `error.code = "unauthorized"`。
 
 未配置令牌时（默认）不做任何校验，本机演示无需认证。
 

@@ -163,9 +163,27 @@ export async function render(container, ctx) {
       {
         title: '操作',
         render: (row) => el('div', { class: 'row' }, [
-          el('a', { href: api.exportZipUrl(row.uuid), text: '导出 zip', title: '打包下载该会话全部产物' }),
-          el('a', { href: `#/report?session=${row.uuid}`, text: '报告' }),
-          el('a', { href: `#/training?session=${row.uuid}`, text: '训练' }),
+          // 三个链接的可见文字（导出 zip / 报告 / 训练）每行都一样，
+          // 读屏无法区分是哪条会话：aria-label 带上完整 uuid 与动作。
+          // 原生 <a href> 本身就在 Tab 顺序里且 Enter 可激活，无需额外 keydown。
+          el('a', {
+            href: api.exportZipUrl(row.uuid),
+            text: '导出 zip',
+            attrs: {
+              title: '打包下载该会话全部产物',
+              'aria-label': `导出会话 ${row.uuid} 的全部产物（zip 打包下载）`,
+            },
+          }),
+          el('a', {
+            href: `#/report?session=${row.uuid}`,
+            text: '报告',
+            attrs: { 'aria-label': `查看会话 ${row.uuid} 的评估报告` },
+          }),
+          el('a', {
+            href: `#/training?session=${row.uuid}`,
+            text: '训练',
+            attrs: { 'aria-label': `查看会话 ${row.uuid} 的神经反馈训练视图` },
+          }),
         ]),
       },
     ], items) : empty('没有符合筛选条件的会话。'),

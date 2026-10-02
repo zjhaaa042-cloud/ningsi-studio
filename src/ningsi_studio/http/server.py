@@ -19,7 +19,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ningsi_studio.http import sse
-from ningsi_studio.http.router import ApiError, Request, Response, Router, jsonable
+from ningsi_studio.http.router import (ApiError, Request, Response, Router, Unauthorized,
+                                       jsonable)
 from ningsi_studio.http.static_handler import StaticHandler
 from ningsi_studio.settings import Settings
 
@@ -126,8 +127,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         )
 
         try:
-            self._check_token(request)
             if path == "/api" or path.startswith("/api/"):
+                # token 只守接口，不拦静态资源：`--token` 的 help 与 Settings.api_token 的
+                # 注释都只承诺"所有 /api 请求需带令牌"，且静态页面本身不含数据。
+                # 校验放在 /api 分支内（而不是 _handle 开头）是必须的：否则带 --token 启动时
+                # GET /index.html 会 401，前端拿不到 SPA 入口，页面永远 boot 不起来。
+                self._check_token(request)
                 response = self.router.dispatch(request)
                 if getattr(response, "stream", False):
                     return self.send_event_stream(
@@ -188,7 +193,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
         provided = request.headers.get("x-api-token") or request.query.get("token")
         if provided != token:
-            raise ApiError("缺少或错误的 API Token", status=401)
+            # 用 Unauthorized（401/unauthorized）而不是裸 ApiError：后者的默认 code 是
+            # internal_error，前端会把"令牌错误"当成服务端故障，与 docs/API.md 的
+            # 错误体约定（401 → unauthorized）也不一致。
+            raise Unauthorized("缺少或错误的 API Token")
 
     def _common_headers(self) -> None:
         origin = self.headers.get("Origin")

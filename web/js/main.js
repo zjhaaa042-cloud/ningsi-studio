@@ -20,6 +20,7 @@ import * as live from './views/live.js';
 import * as training from './views/training.js';
 import * as history from './views/history.js';
 import * as report from './views/report.js';
+import * as panels from './views/panels.js';
 
 const ROUTES = [
   { path: '#/dashboard', label: '仪表盘', module: dashboard },
@@ -29,6 +30,8 @@ const ROUTES = [
   { path: '#/training', label: '训练视图', module: training },
   { path: '#/history', label: '历史与趋势', module: history },
   { path: '#/report', label: '评估报告', module: report },
+  { path: '#/models', label: '模型训练', module: panels.models },
+  { path: '#/devices', label: '设备状态', module: panels.devices },
 ];
 
 const DEFAULT_ROUTE = '#/dashboard';

@@ -607,3 +607,68 @@ button.btn--sm { padding: 4px 9px; font-size: 12px; }
   .sidenav__list { flex-direction: row; flex-wrap: wrap; }
   .topbar__session { margin-left: 0; width: 100%; }
 }
+
+/* ===== task-4 a11y 焦点样式 ===== */
+/* 键盘用户必须看得见焦点落在哪个操作元素上：列表操作列的「编辑 / 开始会话 / 导出 zip /
+   报告 / 训练」、被试编号按钮、侧边栏链接与表单控件。浏览器默认焦点圈在深色紧凑表格里
+   几乎看不见，Tab 走位等于摸黑。这里统一用 :focus-visible（只对键盘焦点生效，
+   鼠标点击不画外圈），描边取 currentColor —— 不引入新配色，深浅色主题都自适应。 */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 表格单元格里的按钮/链接紧挨着：焦点圈收 1px，避免被相邻单元格的 overflow 裁掉 */
+table.data td .btn:focus-visible,
+table.data td a:focus-visible,
+.row .btn:focus-visible,
+.row a:focus-visible {
+  outline-offset: 1px;
+}
+
+/* 侧边栏：焦点圈与 aria-current 的当前页底色要能区分开 */
+.sidenav__link:focus-visible {
+  outline-offset: 2px;
+}
+
+/* 高对比偏好：加粗描边，弱视用户也能定位焦点 */
+@media (prefers-contrast: more) {
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline-width: 3px;
+  }
+}
+
+/* ===== task-9 长路径不撑破布局 ===== */
+/* 起因（verify-e2e final4 唯一 FAIL）：用文档推荐的 `--data D:\path\to\data`
+   起服务时，`GET /api/health.data_dir` 是一条 90+ 字符的绝对路径，仪表盘
+   「运行环境」卡把它渲染成不换行文本，grid 子项默认 min-width:auto 又不肯收缩，
+   于是整页横向溢出 297px（1600 视口 → scrollWidth 1897）。 */
+
+/* grid/flex 子项默认 min-width:auto：长单词（Windows 路径没有空格）不会收缩，
+   必须显式 min-width:0 才能让子项缩到内容宽度以下。顺手覆盖两类网格，
+   避免同类长文本在 #/live、#/training、#/report 里再犯同一个坑。 */
+.env-cell,
+.path-cell,
+.grid--2 > *,
+.grid--3 > * {
+  min-width: 0;
+}
+
+/* 方案：单行省略号（而不是换行）。理由有两个——
+   ① 仪表盘整页高度保持不变（绝对 --data 下仍 1884px，给 ≤1900 目标与 ≤2000 断言留余量；
+      若改成换行会多出约 3 行、把整页推到 1900 以上）；
+   ② 完整路径仍然保留在 title 与 DOM 文本里，hover 可看、可选中复制，
+      截图与自动化断言读 textContent 也不会丢信息。 */
+.path-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 允许换行的路径场景（卡片正文里的「模型文件：D:\...\models\classifier.json」等）：
+   Windows 路径没有空格，普通换行断不开，必须 overflow-wrap:anywhere 才生效。 */
+.path-wrap {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}

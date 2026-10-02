@@ -120,6 +120,9 @@ export function render(container, ctx) {
     signalFpsFrames: 0,
     measuredFps: 0,
     ended: false,                   // 会话终态：服务端停止推帧/心跳，界面必须主动降级，不能"假在线"
+    terminalStatus: null,           // 终态来源（done / failed / cancelled），来自事件或 /live 的 status
+    endLabel: null,                 // 终态阶段文本（正常结束 / 运行出错 / 已取消）
+    endNote: null,                  // 给用户的一句中文说明（说明保留的是哪一段已采集数据）
   };
 
   /* ---------------------------------------------------------- 页面分区 */
@@ -182,6 +185,49 @@ export function render(container, ctx) {
     renderSignal({ force: true });
   };
 
+  /** 终态文案：done / cancelled / failed 各自的中文说明（保留已采集数据的口径）。 */
+  const terminalText = (status, error) => {
+    const normalized = String(status || 'done');
+    if (normalized === 'done') return { label: '正常结束', note: '会话已正常结束，以下为结束后保留的数据。' };
+    if (normalized === 'cancelled' || normalized === 'canceled') {
+      // 库里的 error 字段对取消会话就是"会话已取消"这句套话，直接拼会变成
+      // 「会话已被取消（会话已取消）」；与标签重复时不再附加括号说明。
+      const reason = String(error || '').trim();
+      const redundant = !reason || reason === '会话已取消' || reason === '已取消' || reason === '会话已被用户取消';
+      return {
+        label: '已取消',
+        note: `会话已被取消${redundant ? '' : `（${reason}）`}，以下为取消前已采集的数据。`,
+      };
+    }
+    return { label: '运行出错', note: `会话运行失败：${error || '未知原因'}；以下为失败前已采集的数据。` };
+  };
+
+  /**
+   * 终态落地：会话被取消 / 运行中报错 / 正常结束都收敛到这里。
+   *
+   * 后端事件契约（core/runtime.py）：
+   * - `cancelled` {message} → `_finish("cancelled", "会话已取消")`（runtime.py:103/170）；
+   * - `error` {message, detail} → `_finish("failed", str(exc))`（runtime.py:174-175）；
+   * - 收尾统一再发 `finished` {status, error, summary}（runtime.py:835）。
+   * 已采集的指标 / 热力图 / 预警一律保留，只降级状态与信号流，
+   * 否则页面会停在"进行中"却没有任何数据在动。
+   */
+  const applyTerminal = (status, note, label) => {
+    if (local.missing) return;
+    const session = { ...(ctx.store.state.currentSession || {}) };
+    session.uuid = uuid;
+    session.status = status;
+    // 后端把 cancelled 也写成 phase=error（runtime.py:831），所以终态阶段单独给文本，
+    // 不能直接把 phase 拿去 phaseText() —— 那会把"已取消"显示成"失败"。
+    local.terminalStatus = status;
+    local.endLabel = label || terminalText(status, null).label;
+    local.endNote = note || terminalText(status, null).note;
+    ctx.store.setState({ currentSession: session });
+    markEnded();                 // 幂等：已降级时直接返回，下面仍要刷新状态卡与信号面板
+    renderState();
+    renderSignal({ force: true });
+  };
+
   const renderState = () => {
     if (local.missing) return;
     stateHost.textContent = '';
@@ -190,7 +236,13 @@ export function render(container, ctx) {
       el('div', { class: 'grid grid--3' }, [
         el('div', {}, [
           el('p', { class: 'muted', text: '状态 / 阶段' }),
-          el('p', { text: `${statusText(pick(session, 'status', null))}｜${phaseText(pick(session, 'phase', null), pick(session, 'phase_label', null))}` }),
+          el('p', {
+            text: local.terminalStatus
+              // 终态优先：cancelled 事件后后端库里 phase 是 error，
+              // 直接读 phase 会显示成"失败"，与"已取消"不一致
+              ? `${statusText(local.terminalStatus)}｜${local.endLabel || DASH}`
+              : `${statusText(pick(session, 'status', null))}｜${phaseText(pick(session, 'phase', null), pick(session, 'phase_label', null))}`,
+          }),
         ]),
         el('div', {}, [
           el('p', { class: 'muted', text: '数据源' }),
@@ -218,6 +270,9 @@ export function render(container, ctx) {
         : null,
       local.auto
         ? el('p', { class: 'muted', text: '快速演示模式（time_scale < 0.2）：交互阶段由服务端自动作答。' })
+        : null,
+      local.endNote
+        ? el('p', { class: 'muted', text: local.endNote })
         : null,
       table([
         { title: '字段', render: (row) => row[0] },
@@ -474,7 +529,11 @@ export function render(container, ctx) {
       renderMetrics();
       renderAlerts();
       // 终态降级：后端 /live 明确给出 runtime_alive（routes.py:599）；字段缺失时退回"状态是否终态"
-      if (data.runtime_alive === false || TERMINAL_STATUSES.has(String(data.status))) markEnded();
+      if (data.runtime_alive === false || TERMINAL_STATUSES.has(String(data.status))) {
+        const status = TERMINAL_STATUSES.has(String(data.status)) ? String(data.status) : 'done';
+        const text = terminalText(status, pick(data, 'error', null));
+        applyTerminal(status, text.note, text.label);
+      }
     } catch (error) {
       if (ctx.signal.aborted) return;
       // 404 是"会话不存在"的正常分支：静默 + 停轮询，不再每 10 秒弹一次 toast
@@ -613,12 +672,29 @@ export function render(container, ctx) {
         noticeHost.append(card('采集提示', body));
         break;
       }
+      case 'cancelled': {
+        // runtime.py:103 `bus.publish("cancelled", {"message": "会话已被用户取消"})`
+        // 文案统一走 terminalText：后端那句 message 与"已取消"重复时不会拼出双重说明。
+        const message = pick(payload, 'message', null) || '会话已被用户取消';
+        const text = terminalText('cancelled', message);
+        applyTerminal('cancelled', text.note, text.label);
+        renderAlerts();
+        loadHeatmap();
+        break;
+      }
+      case 'error': {
+        // runtime.py:174 `bus.publish("error", {"message": str(exc), "detail": detail})`
+        const message = pick(payload, 'message', null) || '未知错误';
+        applyTerminal('failed', `会话运行出错：${message}；以下为出错前已采集的数据。`, '运行出错');
+        renderAlerts();
+        loadHeatmap();
+        break;
+      }
       case 'finished': {
-        const session = { ...(ctx.store.state.currentSession || {}) };
-        session.status = payload.status;
-        ctx.store.setState({ currentSession: session });
-        // 服务端在终态停止推帧与心跳：这里主动降级（停轮询 / 关信号流 / 徽标改为已结束）
-        markEnded();
+        // runtime.py:835 `bus.publish("finished", {"status", "error", "summary"})`
+        const text = terminalText(payload && payload.status, pick(payload, 'error', null));
+        applyTerminal(String(pick(payload, 'status', 'done')), text.note, text.label);
+        renderAlerts();
         loadHeatmap();
         break;
       }

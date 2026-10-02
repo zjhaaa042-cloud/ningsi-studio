@@ -98,7 +98,7 @@ python -m ningsi_studio export-ledger      # 从库重放 JSONL 台账
 
 | 地址 | 内容 |
 |---|---|
-| `http://127.0.0.1:8765/` | 前端界面（七个视图） |
+| `http://127.0.0.1:8765/` | 前端界面（九个视图） |
 | `http://127.0.0.1:8765/api/openapi.json` | 接口描述（机器可读） |
 | `http://127.0.0.1:8765/api/health` | 服务与口径版本自检 |
 | `http://127.0.0.1:8765/api/devices` | 可用数据源：仿真源 + 扫描到的真实 LSL 流 |
@@ -241,13 +241,15 @@ assessment / model / artifacts / cancelled / error / finished`。
 
 ```powershell
 .\run.ps1 -Action check       # 静态自检：语法、接口与事件文档、前端资源与接口调用一致性
-.\run.ps1 -Action test        # 85 个用例：单元 + 集成 + 端到端（无需浏览器与真实设备）
+.\run.ps1 -Action test        # 91 个用例：单元 + 集成 + 端到端（无需浏览器与真实设备）
 .\run.ps1 -Action smoke       # 对已启动服务做 HTTP 冒烟：建被试 → 建会话 → 校验报告/热力图/趋势/zip
 ```
 
-测试覆盖：健康与配置端点、被试 CRUD 与校验、会话生命周期与并发上限、SQLite 持久化与重开、
+测试覆盖：健康与配置端点、被试 CRUD 与校验（含 PATCH 编辑）、会话生命周期与并发上限、SQLite 持久化与重开、
 SSE 事件与 `Last-Event-ID` 重放（含裸 `NaN/Infinity` 净化）、量表/行为计分与引擎口径一致、
-会话列表 `phase_label` 与结束后 `runtime.source_kind` 回归、`SignalFeedRegistry` 清扫、趋势台账聚合、
+会话列表 `phase_label` 与结束后 `runtime.source_kind` 回归、终态 `phase` 与 `status` 对齐、
+`SignalFeedRegistry` 清扫、趋势台账聚合、集合响应统一信封（`/api/scales`、产物清单）与真分页、
+`--token` 只保护 `/api`（静态资源放行、401 `code=unauthorized`）、
 `/api/overview`、`/api/devices/status`、非运行会话 `/signal` 409、`POST /api/models/train`、端到端产物齐全。
 
 **本机验证记录（Windows 10 + PowerShell 5.1 + Anaconda Python 3.12.4 + NumPy 2.2.6）**
@@ -256,7 +258,7 @@ SSE 事件与 `Last-Event-ID` 重放（含裸 `NaN/Infinity` 净化）、量表/
 |---|---|---|
 | 语法编译 | `python -m compileall -q src tests` | 通过 |
 | 静态自检 | `python -m ningsi_studio check` | 通过（47 个 py 文件 / 36 条路由 / 23 种文档事件 / 24 种发布事件） |
-| 自动化测试 | `python -m unittest discover -s tests -t .` | **85 个用例全部通过**（实测 167 秒） |
+| 自动化测试 | `python -m unittest discover -s tests -t .` | **91 个用例全部通过**（实测 165 秒） |
 | 端到端链路 | `python -m ningsi_studio demo --participant p01 --speed 0.05` | `status=done`，产出报告 md/json、热力图、趋势、模型、台账 |
 | HTTP 冒烟 | `scripts\smoke.ps1`（对运行中的服务） | 全部通过，含 `export.zip` 9.8 KB |
 | 前端资源 | 逐个请求 `web/` 下 15 个文件 | 全部 200，MIME 正确（含 `text/javascript`） |

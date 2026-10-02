@@ -309,9 +309,17 @@ export async function render(container, ctx) {
       el('p', { class: 'muted', text: '并发上限' }),
       el('p', { class: 'mono', text: `${fmtInt(pick(health.data, 'max_active_sessions'))} 个会话；当前运行 ${fmtInt(list(pick(health.data, 'active_sessions', [])).length)} 个` }),
     ]),
-    el('div', {}, [
+    el('div', { class: 'env-cell' }, [
       el('p', { class: 'muted', text: '数据目录' }),
-      el('p', { class: 'mono nowrap', text: pick(health.data, 'data_dir', DASH), title: pick(health.data, 'data_dir', '') }),
+      // 用 `--data D:\...`（文档推荐的换目录方式）时这条路径可达 90+ 字符：
+      // 原先是 `mono nowrap`，在 grid--3 里既不换行也不收缩，把整行撑出 297px 横向滚动。
+      // 现在改成单行省略号（path-ellipsis）+ title 保留完整路径：
+      // 既不撑破布局，也不抬高卡片高度（保证仪表盘整页高度不变），完整路径仍可 hover/复制。
+      el('p', {
+        class: 'mono path-ellipsis',
+        text: pick(health.data, 'data_dir', DASH),
+        title: pick(health.data, 'data_dir', ''),
+      }),
     ]),
   ]));
   page.append(environmentCard);

@@ -1,18 +1,19 @@
 """会话接口：创建（201 与字段）/ 非法 time_scale(422) / 列表过滤 / 详情（runs+alerts）/
-取消非运行会话(409) / 并发上限(429) / 产物下载响应头 / 模型训练与台账趋势。"""
+取消非运行会话(409) / 终态 phase（cancelled / failed）/ 并发上限(429) / 产物下载响应头 /
+模型训练与台账趋势。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 try:                                              # 支持直接以脚本方式运行本文件
-    from tests.helpers import PHASE_KEYS, QUICK_TIME_SCALE, StudioTestCase
+    from tests.helpers import (PHASE_KEYS, QUICK_TIME_SCALE, StudioTestCase, read_artifacts)
 except ModuleNotFoundError:                       # pragma: no cover - 仅脚本运行场景
     import sys
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from tests.helpers import PHASE_KEYS, QUICK_TIME_SCALE, StudioTestCase
+    from tests.helpers import (PHASE_KEYS, QUICK_TIME_SCALE, StudioTestCase, read_artifacts)
 
 from ningsi import config
 from ningsi_studio import bootstrap
@@ -228,6 +229,55 @@ class SessionCancelTests(StudioTestCase):
         self.assert_error(self.delete(f"/api/sessions/{uuid}"), 409, "conflict",
                           "取消非运行中的会话应返回 409")
 
+    def test_cancelled_session_phase_is_cancelled_not_error(self) -> None:
+        """取消后 `phase` 必须如实写 cancelled，不能落到历史遗留的 "error"。
+
+        曾经 `SessionRuntime._finish` 把一切非 done 的终态都写成 "error"，前端 phaseText
+        把 error 译成「失败」，于是同一行出现「状态=已取消 / 阶段=失败」的自相矛盾。
+        """
+        session = self.create_session("m32", time_scale=1.0)
+        uuid = session["uuid"]
+        self.cancel_session_via_api(uuid)
+
+        detail = self.wait_for(lambda: self.session_detail(uuid),
+                               lambda item: item.get("status") != "running",
+                               timeout=20.0, message="取消后会话应离开 running")
+        self.assertEqual(detail["status"], "cancelled", "取消应把状态收成 cancelled")
+        self.assertEqual(detail["phase"], "cancelled",
+                         "phase 应如实写终态 cancelled（前端显示「已取消」）")
+        self.assertNotEqual(detail["phase"], "error",
+                            'cancelled 不能再被写成 "error"，否则同一行会显示状态=已取消、阶段=失败')
+
+        listed = self.json_body(self.get("/api/sessions?participant=m32"), 200,
+                                "按被试过滤应返回 200")
+        self.assertEqual([item["phase"] for item in listed["items"]], ["cancelled"],
+                         "列表页同一行也应给 cancelled")
+
+    def test_failed_session_phase_is_failed(self) -> None:
+        """运行线程异常时 `phase` 写 failed（与 status 同一个词），不是 done，也不是 error。"""
+        from ningsi_studio.core import runtime as runtime_module
+
+        original_run = runtime_module.SessionRuntime._run
+
+        def boom(self) -> None:                    # noqa: ANN001 - 仅用于制造一次可控失败
+            raise RuntimeError("注入的失败（测试用）")
+
+        runtime_module.SessionRuntime._run = boom
+        try:
+            session = self.create_session("m33", time_scale=1.0)
+            uuid = session["uuid"]
+            detail = self.wait_for(lambda: self.session_detail(uuid),
+                                   lambda item: item.get("status") != "running",
+                                   timeout=30.0, message="失败会话应离开 running")
+        finally:
+            runtime_module.SessionRuntime._run = original_run
+
+        self.assertEqual(detail["status"], "failed", "运行线程异常应把会话收成 failed")
+        self.assertEqual(detail["phase"], "failed",
+                         "phase 应如实写 failed（前端显示「失败」）")
+        self.assertNotEqual(detail["phase"], "done", "失败会话不能被写成 done")
+        self.assertIn("注入的失败", detail["error"] or "", "error 应保留失败原因")
+
 
 class SessionConcurrencyTests(StudioTestCase):
     """并发运行会话上限。"""
@@ -264,8 +314,15 @@ class ArtifactDownloadTests(StudioTestCase):
         detail = self.wait_session_done(uuid)
         self.assertEqual(detail["status"], "done", "快速演示会话应正常结束")
 
-        items = self.json_body(self.get(f"/api/sessions/{uuid}/artifacts"), 200,
-                               "产物清单应返回 200")["items"]
+        payload = self.json_body(self.get(f"/api/sessions/{uuid}/artifacts"), 200,
+                                 "产物清单应返回 200")
+        self.assertEqual(set(payload), {"items", "total", "limit", "page"},
+                         "产物清单应返回列表类响应的统一信封（见 docs/API.md 分页约定）")
+        items = payload["items"]
+        self.assertEqual(payload["total"], len(items), "total 应为该会话登记的产物总数")
+        self.assertGreaterEqual(payload["total"], 6, "快速演示会话至少登记 6 个产物")
+        self.assertEqual((payload["limit"], payload["page"]), (50, 1),
+                         "默认应为 limit=50&page=1")
         kinds = {item["kind"] for item in items}
         for kind in ("report_md", "report_json", "heatmap_svg", "trend_svg", "model", "history"):
             self.assertIn(kind, kinds, f"产物清单应包含 {kind}")
@@ -275,6 +332,23 @@ class ArtifactDownloadTests(StudioTestCase):
             self.assertTrue(item["exists"], f"产物 {item['kind']} 的文件应存在：{item['path']}")
             self.assertGreater(item["bytes"], 0, f"产物 {item['kind']} 的字节数应大于 0")
             self.assertEqual(len(item["sha256"]), 64, f"产物 {item['kind']} 应带 sha256")
+            self.assertTrue(Path(item["path"]).is_file(),
+                            f"产物 {item['kind']} 的 path 应是真实文件：{item['path']}")
+
+        # 与 artifacts 表对账：接口列出的 kind 集合应与落库登记完全一致（不多不少）
+        recorded = {row["kind"] for row in read_artifacts(self.db_path, uuid)}
+        self.assertEqual(kinds, recorded, "接口产物的 kind 集合应与 artifacts 表登记一致")
+
+        # 真分页：limit=2&page=2 应返回另外两条，total 仍是产物总数
+        sliced = self.json_body(self.get(f"/api/sessions/{uuid}/artifacts?limit=2&page=2"), 200,
+                                "产物清单第 2 页应返回 200")
+        self.assertEqual(sliced["total"], payload["total"], "分页请求的 total 仍应为产物总数")
+        self.assertEqual((sliced["limit"], sliced["page"]), (2, 2), "limit/page 应回显请求值")
+        second_kinds = {item["kind"] for item in sliced["items"]}
+        self.assertEqual(len(second_kinds), 2, "limit=2 时第 2 页应返回 2 条")
+        self.assertLessEqual(second_kinds, kinds, "第 2 页的 kind 应来自同一产物集合")
+        self.assertNotEqual(second_kinds, {item["kind"] for item in items[:2]},
+                            "第 2 页不应重复第 1 页的前两条")
 
         response = self.get(f"/api/sessions/{uuid}/artifacts/report_json")
         self.assert_status(response, 200, "report_json 下载应返回 200")

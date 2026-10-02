@@ -132,6 +132,23 @@ def _subject_public(row, counts: dict | None = None) -> dict:
     })
 
 
+def _collection_page(items: list, *, limit: int, offset: int) -> dict:
+    """列表类响应的统一信封：`{items,total,limit,page}`（见 docs/API.md「分页约定」）。
+
+    `limit/offset` 由 `schemas.pagination(request)` 解析（默认 limit=50、page 从 1 起、
+    limit 上限 200）。这里做**真实切片**而不是只回填 `limit=len(items)/page=1`：
+    后者会让 `?page=2` 静默返回第 1 页的数据，比缺字段更糟。
+    """
+    total = len(items)
+    page = offset // limit + 1
+    return jsonable({
+        "items": items[offset:offset + limit],
+        "total": total,
+        "limit": limit,
+        "page": page,
+    })
+
+
 # --------------------------------------------------------------------- 路由
 
 class StudioSessionManager(SessionManager):
@@ -168,10 +185,14 @@ def build_router(settings: Settings) -> Router:
         return signal_feed.REGISTRY.sweep(is_live)
 
     def rollback_session(uuid: str, reason: str) -> None:
-        """会话未能真正启动（并发超限等）时把库里的行收成 failed，不留幽灵会话。"""
+        """会话未能真正启动（并发超限等）时把库里的行收成 failed，不留幽灵会话。
+
+        phase 与 status 保持同一个词（都用 failed）：终态阶段名直接给前端本地化，
+        不再写历史遗留的 "error"（那是早期把 failed/cancelled 混在一起时的写法）。
+        """
         try:
             with store.connect(db_path) as conn:
-                repo.update_session(conn, uuid, status="failed", phase="error", error=reason,
+                repo.update_session(conn, uuid, status="failed", phase="failed", error=reason,
                                     ended_at=store.utcnow())
         except Exception:  # noqa: BLE001 - 回滚失败只记日志，不改变对外错误语义
             pass
@@ -683,7 +704,8 @@ def build_router(settings: Settings) -> Router:
     # ------------------------------------------------------------ 量表作答
     @router.get(r"/api/scales")
     def scale_catalog(request: Request) -> Response:
-        return Response.json({"items": scales_domain.catalog()})
+        limit, offset = schemas.pagination(request)
+        return Response.json(_collection_page(scales_domain.catalog(), limit=limit, offset=offset))
 
     @router.get(r"/api/scales/{code}")
     def scale_definition(request: Request) -> Response:
@@ -862,13 +884,14 @@ def build_router(settings: Settings) -> Router:
     @router.get(r"/api/sessions/{uuid}/artifacts")
     def session_artifacts(request: Request) -> Response:
         uuid = schemas.ensure_uuid(request.params["uuid"])
+        limit, offset = schemas.pagination(request)
         with store.read_only(db_path) as conn:
             row = _session_row(conn, uuid)
             artifacts = schemas.rows_to_dicts(repo.list_artifacts(conn, row["id"]))
         for item in artifacts:
             item["exists"] = Path(item["path"]).exists() if item.get("path") else False
             item["download"] = f"/api/sessions/{uuid}/artifacts/{item['kind']}"
-        return Response.json({"items": jsonable(artifacts)})
+        return Response.json(_collection_page(artifacts, limit=limit, offset=offset))
 
     @router.get(r"/api/sessions/{uuid}/artifacts/{kind}")
     def download_artifact(request: Request) -> Response:
