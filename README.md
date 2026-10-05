@@ -176,6 +176,13 @@ cd ningsi-studio
 数据来源始终标注：未接真实设备时界面顶栏、会话 `source` 字段与报告 `extras` 都会写明"仿真"，
 不作静默替换（与 `ningsi/docs/REQUIREMENT_COVERAGE.md` 的边界说明一致）。
 
+**交互阶段可断点续做**：SSE 只推新事件、不重放历史，因此"页面在交互阶段中途打开/刷新"曾经拿不到
+作答区（量表是纯前端表单缺失；SART/PVT 更严重——试次由客户端驱动、`INPUT_TIMEOUT_SEC = 900s`
+且不随 `time_scale` 缩放，没人作答就整段停摆）。现在 `web/js/views/flow.js` 在拿到
+`GET /api/sessions/{uuid}` 的 `runtime.awaiting_input` 后重建交互区：量表按 `scales:<CODE>`
+重建作答表单（幂等，多次刷新不会出现两份）；SART/PVT 则补交一笔 `responded=false`（不伪造反应时）
+解锁在途试次，等下一个 `trial` 事件继续，并把行为任务区滚到视口内（否则 1000px 视口下刺激在折叠线以下）。
+
 ---
 
 ## 三、数据模型（SQLite，WAL 模式）

@@ -40,6 +40,28 @@ const PHASE_FALLBACK = [
 
 const INTERACTIVE_KEY = { scales: '量表作答', sart: 'SART 按键任务', pvt: 'PVT 按键任务' };
 
+/**
+ * 量表指导语的兜底文案。
+ * 值必须与后端 `core/runtime.py` 在 `_run_scales` 里发布的 `instruction` 逐字一致
+ * （`请按最近一周的实际感受作答；量表结果只作提示。`）。
+ * 理由：SSE 不重放历史事件，中途打开/刷新时拿不到 `scale_request`，只能靠
+ * `GET /api/sessions/{uuid}` 的 `runtime.awaiting_input` 补建作答区；两条路径必须显示同一句指导语，
+ * 否则「全程开着」与「中途打开」会看到两种不同措辞。
+ */
+const SCALE_INSTRUCTION_FALLBACK = '请按最近一周的实际感受作答；量表结果只作提示。';
+
+/**
+ * `runtime.awaiting_input` 里可能出现的非量表等待名。
+ * 实测（Lead 探针）SART/PVT 阶段确实会以 `sart` / `pvt` 出现：后端 `core/runtime.py:500-509`
+ * `_wait_trial` 是**先 publish("trial") 再 wait_for_input(name)**，即试次由客户端驱动 ——
+ * 服务端发出第 N 个试次后必须等到作答才发第 N+1 个，而 `INPUT_TIMEOUT_SEC = 900.0`（runtime.py:40）
+ * **不随 time_scale 缩放**。所以页面中途打开时若不补一次"未作答"上报，整段训练会一路停摆。
+ */
+const TASK_WAIT_KEYS = ['sart', 'pvt'];
+
+/** 中途打开时该试次的恢复提示：刺激已过去，不能伪造反应时，只能如实记为未作答。 */
+const RESTORE_HINT = '已恢复：本试次刺激在页面打开前已呈现，无法重放；本试次按"未作答"记录，下一试次起正常。';
+
 /** 推进方式 → 面板上的一行说明（与参考工程 timed / operator / form 语义一致）。 */
 const ADVANCE_TEXT = {
   auto: '本阶段自动推进，不需要你操作',
@@ -143,6 +165,9 @@ export function render(container, ctx) {
       phaseList.style.gap = '4px 10px';
       phaseList.style.margin = '0';
       phaseList.style.padding = '0';
+      // 展开某一项时，网格默认的 align-items: stretch 会把同排其它项拉成同样高，
+      // 内容较短的那些项下方就留下一片带边框的空白。改成 start：每项各自按内容高度。
+      phaseList.style.alignItems = 'start';
     }
     container.querySelectorAll('.phase-item').forEach((item) => {
       item.style.padding = '3px 6px';
@@ -265,6 +290,10 @@ export function render(container, ctx) {
   const local = {
     uuid,
     auto: false,
+    autoKnown: false,               // 是否已经收到 started 快照里的 auto（决定是否需要按 time_scale 推）
+    running: false,                 // 会话是否仍在运行（恢复交互区的前置条件）
+    awaitingInput: [],              // 服务端 runtime.awaiting_input（如 ['scales:SAS']）
+    skippedTasks: new Set(),        // 已补过"未作答"上报的行为任务（每任务最多补一次，避免吃掉后续真实试次）
     phaseState: new Map(),          // key → { label, state, progress }
     phaseOrder: PHASE_FALLBACK.slice(),
     scales: new Map(),              // code → 已渲染的作答区状态
@@ -381,8 +410,21 @@ export function render(container, ctx) {
     if (interactive && !local.auto) {
       body.push(el('div', { class: 'row step__action' }, [
         button('开始作答 / 查看题目', () => {
-          const anchor = interactionHost.querySelector('.card');
-          if (anchor && anchor.scrollIntoView) anchor.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          // 兜底：页面中途打开/刷新时 SSE 不会重放 scale_request，作答卡可能还不存在。
+          // 先按 runtime.awaiting_input 补建（幂等），再滚过去，做到"点了必定有反应"。
+          const restored = restoreInteraction();
+          const anchor = restored || interactionHost.querySelector('.card');
+          if (!anchor) {
+            toast('还没有收到作答任务，请稍候…', 'info');
+            return;
+          }
+          // 滚到卡片顶部而不是居中：量表作答卡有 20 题、比视口还高，居中会把人扔到
+          // 表单中段；顶部才是指导语 + 第一题。留 60px 让粘性顶栏（app.css 的 .topbar，
+          // position:sticky; top:0）不盖住卡片标题。
+          if (anchor.scrollIntoView) {
+            anchor.style.scrollMarginTop = '60px';
+            anchor.scrollIntoView({ block: 'start', behavior: 'smooth' });
+          }
         }, { primary: true, small: true }),
         el('span', { class: 'muted', text: '作答区在本页下方' }),
       ]));
@@ -628,7 +670,7 @@ export function render(container, ctx) {
 
     slot.host.textContent = '';
     slot.host.append(card(`${label || definition.name || slot.code}（${slot.code}）`, el('div', {}, [
-      el('p', { class: 'muted', text: instruction || '请按最近一周的实际感受作答；量表结果只作提示，不作诊断。' }),
+      el('p', { class: 'muted', text: instruction || SCALE_INSTRUCTION_FALLBACK }),
       definition.note ? el('p', { class: 'muted', text: definition.note }) : null,
       ...itemNodes,
       el('div', { class: 'row row--between', style: 'margin-top:12px' }, [status, submit]),
@@ -664,6 +706,82 @@ export function render(container, ctx) {
     ])));
     slot.stage = stage;
     return slot;
+  };
+
+  /**
+   * 把行为任务区带到视口中央，**只在任务开始时做一次**。
+   *
+   * 为什么必须有：SART/PVT 靠键盘对"数字/红点"作答，而这个卡片排在
+   * 「当前该做什么 + 总体进度 + 全部阶段」之后，在 1000px 高的视口里本来就落在折叠线以下
+   * （实测卡片顶边 ≈931px）——刺激看不见，任务就没法做。试次到达时不再重复滚动，
+   * 避免和操作者自己的滚动打架。
+   */
+  const revealTaskStage = (slot) => {
+    const target = slot && (slot.stage || slot.host);
+    if (target && target.scrollIntoView) {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  };
+
+  /**
+   * 中途打开时补一次"未作答"上报，解锁停在等作答的服务端。
+   *
+   * 为什么必须补：后端 `_wait_trial`（core/runtime.py:500-509）先 `publish("trial")` 再
+   * `wait_for_input("sart"/"pvt")`，试次是**客户端驱动**的；页面在试次已经呈现之后才打开，
+   * 刺激无法重放，也就没人能作答 —— 服务端会一直等到 `INPUT_TIMEOUT_SEC`（900s，且不随
+   * time_scale 缩放）才判失败，整段训练停摆。补上这一笔后，服务端立即发出下一试次，
+   * 现有 `case 'trial'` 逻辑会正常渲染，操作者从下一试次起继续作答。
+   *
+   * 只上报"未作答"：不伪造反应时（`rt: null`），也不自造刺激数字。
+   * `index`/`phase` 传 0/'main' 是安全的 —— 服务端用自己的序列
+   * （runtime.py:526 `task.submit(phase=nxt["phase"], index=nxt["index"], ...)`），
+   * 客户端序号只在 api/routes.py 里被 clamp 后丢弃；`rt` 为 null 时路由不做钳制（routes.py:753-755）。
+   * 返回 409（`provide_input` 返回 False，该等待点已被消费）属正常竞态，静默忽略。
+   */
+  const skipPendingTrial = (task) => {    const body = task === 'sart'
+      ? { phase: 'main', index: 0, responded: false, rt: null }
+      : { index: 0, responded: false, rt: null, false_start: false };
+    const request = task === 'sart' ? api.submitSartTrial(uuid, body) : api.submitPvtTrial(uuid, body);
+    Promise.resolve(request).catch(() => { /* 已被消费 / 已不在该阶段：忽略即可 */ });
+  };
+
+  /**
+   * 按服务端 `runtime.awaiting_input` 补建交互区。
+   * 为什么需要：SSE 事件总线不重放历史事件，页面中途打开/刷新时收不到 `scale_request`，
+   * 只有 `GET /api/sessions/{uuid}` 的 `runtime.awaiting_input`（后端 `core/runtime.py` 的
+   * `wait_for_input("scales:SAS")`）知道"后端正在等谁作答"。
+   * token 形如 `scales:SAS`，行为任务则是 `sart` / `pvt`（见 TASK_WAIT_KEYS 注释）。
+   * 幂等：`ensureScaleSlot` 按 code、`ensureTaskSlot` 按 task 去重；行为任务的补偿上报
+   * 在 `local.skippedTasks` 里记账，每个任务每次页面加载最多补一次，避免把后续真实试次吃掉。
+   * 返回第一个被恢复槽位的宿主节点，供「开始作答 / 查看题目」按钮滚动定位。
+   */
+  const restoreInteraction = () => {
+    if (!local.running || local.auto) return null;
+    let firstHost = null;
+    for (const token of local.awaitingInput) {
+      const match = /^scales:([A-Za-z0-9_-]+)$/.exec(String(token || '').trim());
+      if (match) {
+        const code = match[1].toUpperCase();
+        const slot = ensureScaleSlot(code, null, null, SCALE_INSTRUCTION_FALLBACK);
+        firstHost = firstHost || slot.host;
+        continue;
+      }
+      const task = String(token || '').split(':')[0].trim().toLowerCase();
+      if (TASK_WAIT_KEYS.includes(task)) {
+        const slot = ensureTaskSlot(task);
+        firstHost = firstHost || slot.host;
+        // 只在"这一页还没有任务区"时补渲染：否则点「开始作答 / 查看题目」会把屏幕上
+        // 正在呈现的刺激换成占位符，操作者就不知道该不该按了。
+        if (!slot.stage) renderTaskStage(task, { hint: RESTORE_HINT });
+        if (!local.skippedTasks.has(task)) {
+          local.skippedTasks.add(task);
+          skipPendingTrial(task);
+        }
+        // 中途打开就是来参与的：把任务区带到眼前，否则刺激在折叠线以下看不见。
+        revealTaskStage(slot);
+      }
+    }
+    return firstHost;
   };
 
   /** 反应时（秒）：把服务端"事件→刺激"的延时扣掉，并做最小钳制避免负值。 */
@@ -777,6 +895,8 @@ export function render(container, ctx) {
     switch (type) {
       case 'started': {
         local.auto = Boolean(payload.auto);
+        local.autoKnown = true;
+        local.running = true;
         local.phaseOrder = list(payload.phases).length ? list(payload.phases) : PHASE_FALLBACK;
         const session = { ...(ctx.store.state.currentSession || {}) };
         session.uuid = uuid;
@@ -874,11 +994,13 @@ export function render(container, ctx) {
       case 'behavior_request': {
         local.behaviorRequest = payload;
         if (payload.task === 'pvt') {
-          renderTaskStage('pvt', { hint: 'PVT-B：刺激出现后尽快按空格（试次数与刺激时刻表由接口下发）。' });
+          revealTaskStage(renderTaskStage('pvt', {
+            hint: 'PVT-B：刺激出现后尽快按空格（试次数与刺激时刻表由接口下发）。',
+          }));
         } else {
-          renderTaskStage('sart', {
+          revealTaskStage(renderTaskStage('sart', {
             hint: 'SART：看到 1–9 按空格；看到 3 不要按。等待首个刺激…',
-          });
+          }));
         }
         break;
       }
@@ -1049,6 +1171,8 @@ export function render(container, ctx) {
       }
       case 'finished': {
         local.finished = true;
+        local.running = false;
+        local.awaitingInput = [];
         local.trial = null;
         const status = payload.status;
         const session = { ...(ctx.store.state.currentSession || {}) };
@@ -1116,6 +1240,17 @@ export function render(container, ctx) {
       sessionRuntime: { source_kind: runtime.source_kind, source_note: pick(data, 'source_note', null) },
       alerts: list(pick(data, 'alerts', [])),
     });
+    // 中途打开/刷新页面：SSE 不重放历史事件，收不到已经过去的 scale_request，
+    // 只能按后端"正在等谁作答"（runtime.awaiting_input）补建交互区，否则页面上没有作答界面。
+    local.running = data.status === 'running';
+    local.awaitingInput = list(pick(runtime, 'awaiting_input', []));
+    if (!local.autoKnown) {
+      // started 快照可能还没到达；先按后端同一口径（time_scale < 0.2 → 自动作答）推一版，
+      // 避免快速演示模式下中途打开页面弹出不该出现的作答表单。
+      const scaleValue = Number(pick(session, 'time_scale', NaN));
+      if (Number.isFinite(scaleValue)) local.auto = scaleValue < 0.2;
+    }
+    restoreInteraction();
     // 非运行中的会话：SSE 只会补发 phase + finished 快照，这里先把阶段状态按 runs 还原
     const sessionProgress = Number.isFinite(Number(data.progress)) ? Number(data.progress) : null;
     for (const run of list(pick(data, 'runs', []))) {
