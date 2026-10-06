@@ -283,6 +283,31 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 .metric-row__value { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* ------------------------------------------------------------ 当前该做什么 */
+/* ------------------------------------------ 会话流程：任务视图 / 总览切换
+   被测者作答时（量表 / SART / PVT）把总览整块折叠，只留任务与作答区：
+   这些块原本排在作答区前面，1000px 视口里作答卡落在折叠线以下，做题要来回滚动。
+   折叠只改显示（display:none），节点仍留在 DOM 里——中途刷新恢复、
+   SSE 增量更新与验收脚本对 .scale-item / 阶段留白的断言都不受影响。 */
+.flow-taskbar { display: none; }
+
+.flow-taskbar--on {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.flow--task .flow-overview { display: none; }
+
+/* 任务视图下，交互区里"不是当前任务"的历史卡片（设备质检结果 / 最近一窗波形 / 基线…）
+   也一并折叠：实测这些卡会占掉作答卡上方 ~830px，作答卡因此掉出第一屏。 */
+.flow--task .flow-task-hidden { display: none; }
+
 .step { display: flex; flex-direction: column; gap: 8px; padding: 2px 0; }
 .step__head { align-items: baseline; }
 .step__index { color: var(--text-3); font-size: 12px; }

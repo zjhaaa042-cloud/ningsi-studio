@@ -120,20 +120,28 @@ export function render(container, ctx) {
   const stepHost = el('div');
   const noticeHost = el('div');
   const phaseHost = el('div');
-  const interactionHost = el('div');
+  const interactionHost = el('div', { class: 'flow-task' });
   const scaleSummaryHost = el('div');
   const tailHost = el('div');
+  const taskBarHost = el('div', { class: 'flow-taskbar' });
+  // 「总览」= 进度/当前该做什么/阶段清单/汇总/尾部卡片；被测者作答时整块折叠掉（见 syncTaskMode）。
+  // 只折叠显示，不删除节点：中途刷新恢复、阶段留白断言、SSE 更新都不受影响。
+  const overviewHost = el('div', { class: 'flow-overview' });
+  overviewHost.append(
+    stepHost,
+    card('总体进度', progressHost),
+    noticeHost,
+    card('全部阶段（点击可查看该阶段说明）', phaseHost, {
+      sub: '等待 / 进行中 / 完成由 SSE 的 phase 事件驱动；快速模式下交互阶段由后端自动作答',
+    }),
+    scaleSummaryHost,
+    tailHost,
+  );
 
   container.append(head);
-  container.append(stepHost);
-  container.append(card('总体进度', progressHost));
-  container.append(noticeHost);
-  container.append(card('全部阶段（点击可查看该阶段说明）', phaseHost, {
-    sub: '等待 / 进行中 / 完成由 SSE 的 phase 事件驱动；快速模式下交互阶段由后端自动作答',
-  }));
+  container.append(taskBarHost);
+  container.append(overviewHost);
   container.append(interactionHost);
-  container.append(scaleSummaryHost);
-  container.append(tailHost);
 
   /* ---------------------------------------------------- 页面密度（压高） */
   /* 为什么压：`#/flow` 要在 1600×1000 的演示窗口里一屏看全，原来"全部阶段"每项一行、
@@ -282,7 +290,12 @@ export function render(container, ctx) {
     });
   };
   tighten();
-  const densityObserver = new MutationObserver(() => tighten());
+  const densityObserver = new MutationObserver(() => {
+    // 顺序有讲究：先切"任务视图/总览"，再压密度；两者都是幂等的，
+    // 且 renderTaskBar 只在标题或模式变化时才重建节点，不会自激。
+    syncTaskMode();
+    tighten();
+  });
   densityObserver.observe(container, { childList: true, subtree: true });
   ctx.onCleanup(() => densityObserver.disconnect());
 
@@ -307,7 +320,81 @@ export function render(container, ctx) {
     now: Date.now(),                // 每秒刷新，驱动"已用/预计"
     expandedPhase: null,            // 被手动展开查看说明的阶段
     lastStepKey: null,              // 上一步骤，用于记录阶段开始时刻
+    forceOverview: false,           // 任务视图下手动切回总览（换任务时自动复位）
+    lastTaskLabel: null,            // 上一次的任务名，用于"换任务→回到任务视图"
+    taskBarKey: null,               // 任务条已渲染的键（幂等，避免观察者自激）
   };
+
+  /* ------------------------------------------------- 任务视图 / 总览切换 */
+  /**
+   * 「任务视图」：被测者需要作答时，把总览（当前该做什么 / 总体进度 / 阶段清单 / 汇总 / 尾部）
+   * 整块折叠掉，让任务与作答区独占一屏。
+   *
+   * 为什么需要：这些块原本排在作答区**前面**，1600×1000 的演示窗口里量表/刺激卡落在折叠线
+   * 以下（实测刺激卡顶边 ≈931px），做题要来回滚动，"边看题边作答"体验很差。
+   *
+   * 折叠只用 CSS 类（`.flow--task .flow-overview { display: none }`），节点全部留在 DOM 里：
+   * 中途刷新恢复、SSE 增量更新、以及验收脚本对 `.scale-item` / 阶段留白的断言都不受影响。
+   * 任务结束自动回总览；同一任务内可用任务条上的按钮手动切回，**不中断会话**。
+   */
+  const taskModeLabel = () => {
+    if (local.finished) return null;
+    const stage = interactionHost.querySelector('.task-stage');
+    const scale = interactionHost.querySelector('.scale-item');
+    const anchor = stage || scale;
+    if (!anchor) return null;
+    const title = anchor.closest('.card')?.querySelector('.card__title')?.textContent?.trim();
+    return title || (stage ? '行为任务' : '量表作答');
+  };
+
+  const TASK_MODE_HINT = '任务视图：只显示当前任务与作答区，总览已折叠（会话照常运行）';
+
+  /**
+   * 任务视图下，把交互区里**不是当前任务**的卡片也折叠掉。
+   *
+   * 为什么必须做：交互区会累积前面阶段的卡片（设备质检结果、最近一窗波形、基线…），
+   * 实测一个跑到量表阶段的会话里，这些卡在上述作答卡之前占了 ~830px，
+   * 量表卡被推到 1000px 视口之外——只折叠"总览"仍然要滚动才能作答。
+   * 判据是"这张卡里有没有 .scale-item / .task-stage"，所以多张量表同时待答时都保留。
+   */
+  const markTaskCards = () => {
+    [...interactionHost.children].forEach((child) => {
+      const isTask = !!child.querySelector('.scale-item, .task-stage');
+      child.classList.toggle('flow-task-hidden', !isTask);
+    });
+  };
+
+  const renderTaskBar = (label) => {
+    const key = `${label}|${local.forceOverview ? 'overview' : 'task'}`;
+    if (key === local.taskBarKey) return;                 // 幂等：观察者回调里重复调用不再改 DOM
+    local.taskBarKey = key;
+    taskBarHost.textContent = '';
+    if (!label) return;
+    taskBarHost.append(
+      el('span', { class: 'badge badge--strong', text: '任务进行中' }),
+      el('strong', { text: label }),
+      el('span', { class: 'muted', text: TASK_MODE_HINT }),
+      el('div', { class: 'row row--end', style: 'margin-left:auto' }, [
+        button(local.forceOverview ? '回到任务视图' : '查看总览', () => {
+          local.forceOverview = !local.forceOverview;
+          local.taskBarKey = null;                        // 强制重建任务条
+          syncTaskMode();
+          tighten();
+        }),
+      ]),
+    );
+  };
+
+  const syncTaskMode = () => {
+    const label = taskModeLabel();
+    if (label && label !== local.lastTaskLabel) local.forceOverview = false;   // 换任务 → 回任务视图
+    local.lastTaskLabel = label;
+    markTaskCards();
+    taskBarHost.classList.toggle('flow-taskbar--on', !!label);
+    container.classList.toggle('flow--task', !!label && !local.forceOverview);
+    renderTaskBar(label);
+  };
+  ctx.onCleanup(() => container.classList.remove('flow--task'));
 
   /** 当前应该被高亮的阶段：进行中的优先，否则取最后一个已完成的下一阶段。 */
   const currentPhaseKey = () => {
