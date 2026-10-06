@@ -188,7 +188,7 @@ export async function render(container, ctx) {
       },
     ], items) : empty('没有符合筛选条件的会话。'),
     pagination,
-  ])));
+  ]), { sub: '按筛选条件分页；点会话编号进入实时监测', class: 'card--scroll' }));
 
   /* ---------------------------------------------------------- 趋势图 */
   const trendHost = el('div');

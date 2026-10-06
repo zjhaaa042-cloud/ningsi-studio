@@ -414,7 +414,8 @@ async function renderSubjectDetail(host, ctx) {
     { title: '时间倍率', align: 'right', render: (row) => fmtNum(row.time_scale, 2) },
     { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
     { title: '开始时间', render: (row) => fmtRelative(row.started_at) },
-  ], sessions) : empty('该被试还没有会话记录。'), { sub: '点击会话编号进入实时监测' }));
+  ], sessions) : empty('该被试还没有会话记录。'),
+    { sub: '点击会话编号进入实时监测', class: 'card--scroll' }));
 }
 
 export async function render(container, ctx) {
@@ -565,7 +566,7 @@ export async function render(container, ctx) {
         },
       ], items) : empty('还没有被试，先用上方表单创建一个。'),
     ]),
-  ]), { sub: '点击编号进入该被试的会话列表，或点右侧“开始会话”' }));
+  ]), { sub: '点击编号进入该被试的会话列表，或点右侧“开始会话”', class: 'card--scroll' }));
 }
 
 export default render;

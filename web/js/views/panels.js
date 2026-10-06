@@ -232,7 +232,7 @@ function renderSources(sources, sourcesError) {
       real: pick(row, 'real', null) === true ? '是' : (pick(row, 'real', null) === false ? '否（仿真）' : DASH),
       note: pick(row, 'note', DASH),
     })), { caption: '来源：GET /api/devices/status → sources（真实设备未启动时只有仿真源）' }),
-  ], { sub: '仿真源没有硬件，srate/channels 由配置给出，不代表真实采集能力。' });
+  ], { sub: '仿真源没有硬件，srate/channels 由配置给出，不代表真实采集能力。', class: 'card--scroll' });
 }
 
 function renderDeviceHealth(devices, hardwareNote) {

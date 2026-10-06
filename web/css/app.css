@@ -244,6 +244,19 @@ table.data thead th {
 table.data tbody tr:hover { background: var(--surface-2); }
 table.data td.num, table.data th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
+/* 长列表卡：表格区限高 + 内部滚动，表头用 sticky 粘住。
+   为什么：被试列表/会话列表/数据源表会随数据量线性变高（开发库 100+ 行时整页 3276px），
+   页面被一张表撑到几千像素、其余卡片要滚很久才看得到；限高后"页面长度"与数据量解耦。
+   注意只限 .table-wrap 而**不是** .card__body：卡片体里还有搜索框/分页，限制整体会把它们
+   一起滚走（筛选项必须始终可见）。 */
+.card--scroll .table-wrap { max-height: 460px; overflow: auto; }
+.card--scroll table.data thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+
 /* -------------------------------------------------------------- 进度/条 */
 .progress {
   position: relative;
