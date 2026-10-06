@@ -79,6 +79,12 @@ function composeMarkdown(report, config) {
   if (quality.unusable_reasons && Object.keys(quality.unusable_reasons).length) {
     lines.push(`- 排除原因：${Object.entries(quality.unusable_reasons).map(([reason, count]) => `${reason}×${count}`).join('、')}`);
   }
+  // 真实设备 + 快速演示：相邻窗读到几乎同一段缓冲（实测质检阶段 5 个窗指标逐字节相同），
+  // 窗计数不是独立样本。仿真源每窗重新生成数据，不受影响。与后端 report.to_markdown() 同一口径。
+  const extras = pick(report, 'extras', null) || {};
+  if (String(pick(extras, 'source_kind')) === 'lsl' && Number(pick(extras, 'time_scale') || 1) < 0.2) {
+    lines.push('- 采集口径提醒：真实设备 + 快速演示模式（time_scale < 0.2）下相邻 4 秒窗读到的是几乎同一段缓冲数据，上面的可用窗计数是**高重叠样本**，只能用于链路自检；真实节奏采集请用 time_scale = 1.0（此时量表与按键任务由本人操作）。');
+  }
 
   /* 三、量表 */
   lines.push('');
