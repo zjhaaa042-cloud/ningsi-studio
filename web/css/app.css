@@ -536,6 +536,17 @@ button.btn--sm { padding: 4px 9px; font-size: 12px; }
 .gauge-fact__label { color: var(--text-3); font-size: 12px; }
 .gauge-fact__value { font-size: 13px; }
 
+/* 表格里的"结束原因"：单行省略号，完整文本放 title，不撑宽表格 */
+.cell-reason {
+  display: inline-block;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  color: var(--text-2);
+}
+
 /* 仪表说明放在 SVG 外：长文案不会再溢出控件边界 */
 .chart__note { margin: 6px 0 0; text-align: center; }
 

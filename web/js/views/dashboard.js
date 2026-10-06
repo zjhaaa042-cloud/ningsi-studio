@@ -121,11 +121,22 @@ export async function render(container, ctx) {
   const alertCount = alertItems !== null
     ? alertItems.length
     : (metricRow ? pick(metricRow, 'alert_count', null) : null);
+  const totalAlerts = pick(stats, 'alerts', null);
   const qualityConfig = pick(ctx.store.state.config, 'quality', {}) || {};
   const validRatioMin = pick(qualityConfig, 'valid_ratio_min', null);
   const subjectCount = stats.subjects;
   const doneCount = stats.sessions_done;
   const totalCount = stats.sessions;
+  const shortUuid = (row) => (row && row.uuid ? `${String(row.uuid).slice(0, 8)}…` : DASH);
+  // KPI 的"这些数是谁的"必须写清楚：原来只有"最近会话 f65dc682… · 状态 失败
+  // （最新一条仍在运行，指标口径取最近一条已完成会话）"，既没说清取的是哪条、
+  // 又和前半句"最近会话"自相矛盾（用户反馈"显示有问题"就包含这条）。
+  const metricNote = metricRow
+    ? `指标取自最近一次有指标数据的会话 ${shortUuid(metricRow)}（该次状态：${statusText(metricRow.status)}）`
+      + (newest && newest.uuid !== metricRow.uuid
+        ? `；库里最新会话 ${shortUuid(newest)} ${statusText(newest.status)}，未计入`
+        : '')
+    : '尚无会话记录';
 
   const page = el('div');
   page.append(el('div', { class: 'row row--between' }, [
@@ -148,16 +159,15 @@ export async function render(container, ctx) {
       quality
         ? `${fmtInt(pick(quality, 'usable'))}/${fmtInt(pick(quality, 'windows'))} 窗可用`
         : '最近会话没有质检（qc）阶段记录'),
-    renderKpi('预警数', fmtInt(alertCount), metricRow ? `最近会话 ${fmtRelative(metricRow.started_at)}` : '暂无会话'),
+    renderKpi('预警数', fmtInt(alertCount),
+      metricRow
+        ? `会话 ${shortUuid(metricRow)}（${fmtRelative(metricRow.started_at)}）`
+          + (totalAlerts === null ? '' : `｜全库累计 ${fmtInt(totalAlerts)} 条`)
+        : '暂无会话'),
     renderKpi('被试 / 会话', `${fmtInt(subjectCount)} / ${fmtInt(totalCount)}`,
       `已完成 ${fmtInt(doneCount)} 次`),
   ]);
-  page.append(card('关键指标', kpiRow, {
-    sub: metricRow
-      ? `最近会话 ${String(metricRow.uuid).slice(0, 8)}… · 状态 ${statusText(metricRow.status)}`
-        + (newest && newest.status !== 'done' ? '（最新一条仍在运行，指标口径取最近一条已完成会话）' : '')
-      : '尚无会话记录',
-  }));
+  page.append(card('关键指标', kpiRow, { sub: metricNote }));
   // 质检可用窗比例用仪表盘再画一遍：评审时需要"一眼看出质量是否达标"
   // 门槛值读 config.quality.valid_ratio_min（原来是写死的 0.6，与文案"取自 config.quality"不符）
   if (quality) {
@@ -282,6 +292,8 @@ export async function render(container, ctx) {
   }
 
   /* ------------------------------------------------------ 最近会话表格 */
+  const TERMINAL = new Set(['done', 'failed', 'cancelled', 'canceled', 'error']);
+  const isTerminal = (row) => TERMINAL.has(String(row.status || '').toLowerCase());
   const sessionRows = latest.map((row) => ({
     ...row,
     onOpen: () => ctx.navigate(`#/live?session=${row.uuid}`),
@@ -301,15 +313,40 @@ export async function render(container, ctx) {
         }),
       },
       { title: '被试', render: (row) => (row.participant ? `sub-${row.participant}` : DASH) },
-      { title: '状态', render: (row) => statusText(row.status) },
-      // 列表接口的 phase_label 对流程阶段是中文名、终态为 null（后端不编造），
-      // 终态本地化交给 phaseText，未知键原样露出
-      { title: '阶段', render: (row) => phaseText(row.phase, row.phase_label) },
-      { title: '进度', align: 'right', render: (row) => fmtPercent(row.progress) },
+      // 状态格带上"结束原因"的 tooltip：列表接口有 error 字段，失败原因不该只藏在详情里
+      {
+        title: '状态',
+        render: (row) => el('span', {
+          text: statusText(row.status),
+          title: row.error ? `结束原因：${row.error}` : '',
+        }),
+      },
+      // 终态会话的 phase 就是终态本身（failed/cancelled/done），照搬会和"状态"列完全重复
+      // （用户截图里就是"失败｜失败｜0%"三连）。这一格改显示**结束原因**，没有原因才留 —。
+      {
+        title: '阶段 / 结束原因',
+        render: (row) => {
+          const duplicated = String(row.phase || '') === String(row.status || '');
+          if (isTerminal(row) && duplicated) {
+            return row.error
+              ? el('span', { class: 'cell-reason', text: String(row.error), title: String(row.error) })
+              : el('span', { class: 'muted', text: DASH, title: '会话已正常结束，没有结束原因' });
+          }
+          return phaseText(row.phase, row.phase_label);
+        },
+      },
+      // 终态会话（失败/取消）的 progress 恒为 0，直接显示百分比会被读成"什么都没跑"，
+      // 这里只给"进行中/已完成"显示百分比，其余留 —（完整信息在详情页）
+      {
+        title: '进度', align: 'right',
+        render: (row) => (isTerminal(row) && row.status !== 'done'
+          ? el('span', { class: 'muted', text: DASH, title: `会话${statusText(row.status)}，进度不再推进` })
+          : fmtPercent(row.progress)),
+      },
       { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
       { title: '开始时间', render: (row) => fmtTime(row.started_at) },
     ], sessionRows) : empty('还没有会话记录，点右上角“去创建会话”到被试管理里开始一次完整流程。'),
-  ], { sub: '点击会话编号进入实时监测' });
+  ], { sub: '点击会话编号进入实时监测；「结束原因」来自会话的 error 字段' });
   page.append(sessionsCard);
 
   /* ------------------------------------------------------------ 运行环境 */
