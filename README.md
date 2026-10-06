@@ -149,6 +149,29 @@ cd ningsi-studio
 ./scripts/smoke.sh        # 对运行中的服务做冒烟
 ```
 
+### 打包成单文件 exe（给没有 Python 的机器用）
+
+```powershell
+.\run.ps1 -Action package        # 等价于 .\scripts\build_exe.ps1（默认单文件）
+.\scripts\build_exe.ps1 -Mode onedir   # 目录形式：启动更快，但要整个目录一起拷
+```
+
+产物 **`dist\ningsi-studio.exe`（约 20 MB，单文件）**：里面已含引擎、numpy、pylsl（带 liblsl）与整套前端资源。
+
+- **双击即用**：没有子命令时默认 `serve --open`（起服务并打开浏览器）；
+- 与源码运行**同一套 CLI**：`ningsi-studio.exe serve|demo|doctor|lsl-check|simulate-outlet|export-ledger`；
+  `serve --port 8790 --data D:\ningsi-data` 可指定端口与数据目录；
+- **数据放哪**：优先 exe 同级 `var\studio`（便携，整个目录拷到 U 盘就能带走）；
+  该目录不可写（例如装在 `Program Files`）时自动退到 `%LOCALAPPDATA%\ningsi-studio\var\studio`；
+  也可用 `--data` 或环境变量 `NINGSI_STUDIO_DATA` 指定；
+- **只读资源**（`web/`）从包内读（`sys._MEIPASS`），**不写进临时目录**，所以每次运行数据不丢；
+- `check` 与 `ui-check` 需要源码树（exe 里没有 `src/tests/scripts`），打包后会明确提示改用源码运行；
+- 首次启动约 2–3 秒（单文件自解压），之后同机启动更快。
+
+本机实测（Windows 10 + Python 3.12.4 / PyInstaller 6.22.3）：`ningsi-studio.exe doctor` 退出码 0、
+`lsl-check` 能在 exe 内扫到真实 LSL 流（7 条，含 BioMulti Lite EEG）、`demo` 跑完整场会话并落盘 6 类产物、
+`serve` 起服务后 `scripts\smoke.ps1` **全部通过**（含报告/热力图/趋势/`export.zip`）。
+
 ### 依赖
 
 | 依赖 | 必要性 | 说明 |

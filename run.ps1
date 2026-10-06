@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 #  凝思 Studio 一键启动器
 #
 #  注意：本文件必须以 **UTF-8 BOM** 保存。
@@ -6,11 +6,11 @@
 #  没有 BOM 时中文会破坏语法解析（报 "Missing closing '}'"）。
 #
 #  用法：  .\run.ps1 [-Action <名称>] [-Port 8765] [-Participant p01] [-Speed 0.05]
-#  动作：  menu serve demo test check ui-check smoke doctor bootstrap
+#  动作：  menu serve demo test check ui-check smoke doctor bootstrap package
 # ============================================================
 [CmdletBinding()]
 param(
-    [ValidateSet("menu", "serve", "demo", "test", "check", "ui-check", "smoke", "doctor", "bootstrap")]
+    [ValidateSet("menu", "serve", "demo", "test", "check", "ui-check", "smoke", "doctor", "bootstrap", "package")]
     [string]$Action = "menu",
     [int]$Port = 8765,
     [string]$Participant = "p01",
@@ -175,9 +175,10 @@ function Show-Menu {
     Write-Host "  [6] smoke      对正在运行的服务做冒烟测试（需先用 1 启动）"
     Write-Host "  [7] doctor     环境自检：依赖是否齐全、数据库统计"
     Write-Host "  [8] bootstrap  准备运行环境（建虚拟环境并安装依赖）"
+    Write-Host "  [9] package    打包成单文件 exe（dist\ningsi-studio.exe，可拷走即用）"
     Write-Host "  [0] quit       退出"
     Write-Host ""
-    $pick = (Read-Host "  请输入编号（0-8，0=退出）").Trim()
+    $pick = (Read-Host "  请输入编号（0-9，0=退出）").Trim()
     switch ($pick) {
         "1" { return "serve" }
         "2" { return "demo" }
@@ -187,6 +188,7 @@ function Show-Menu {
         "6" { return "smoke" }
         "7" { return "doctor" }
         "8" { return "bootstrap" }
+        "9" { return "package" }
         "0" { return "quit" }
         "" { return "doctor" }
         default { return "menu" }
@@ -282,6 +284,20 @@ while ($true) {
             Write-Step ("对 http://127.0.0.1:" + $Port + " 做冒烟测试")
             & $exe -NoProfile -ExecutionPolicy Bypass -File $smokePath -BaseUri ("http://127.0.0.1:" + $Port) -Participant $Participant
             $script:Ok = $LASTEXITCODE
+        }
+        "package" {
+            $buildPath = Join-Path $Root "scripts\build_exe.ps1"
+            $hostExe = Get-Command pwsh -ErrorAction SilentlyContinue
+            $exe = "powershell"
+            if ($hostExe) { $exe = $hostExe.Source }
+            Write-Step "打包成单文件 exe（PyInstaller，约 1-3 分钟）"
+            & $exe -NoProfile -ExecutionPolicy Bypass -File $buildPath -Mode onefile
+            $script:Ok = $LASTEXITCODE
+            if ($script:Ok -eq 0) {
+                Write-Host "     打包完成：dist\ningsi-studio.exe（双击即启动服务并打开浏览器）" -ForegroundColor Green
+            } else {
+                Write-Err "打包失败（见上面的 [build] 输出与 build\pyinstaller.log）"
+            }
         }
         "serve" {
             $url = "http://127.0.0.1:" + $Port + "/"

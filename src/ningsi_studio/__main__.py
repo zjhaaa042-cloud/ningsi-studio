@@ -16,7 +16,7 @@ from ningsi_studio.app import run as run_app
 from ningsi_studio.core import paired_ledger
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
-from ningsi_studio.settings import Settings
+from ningsi_studio.settings import Settings, default_web_dir, is_frozen
 
 
 def _quiet_third_party_noise() -> None:
@@ -56,11 +56,8 @@ def _settings(args) -> Settings:
     if web:
         settings.web_dir = Path(web)
     else:
-        # 显式给出前端目录：不依赖"包在哪"，仓库布局变了也能找到 web/
-        project_root = Path(__file__).resolve().parents[2]
-        candidate = project_root / "web"
-        if (candidate / "index.html").exists():
-            settings.web_dir = candidate
+        # 前端目录：源码运行取仓库 web/，打包后取包内 web/（见 settings.default_web_dir）
+        settings.web_dir = default_web_dir()
     settings.open_browser = bool(getattr(args, "open", False))
     token = getattr(args, "token", None)
     if token:
@@ -87,6 +84,9 @@ def _doctor(args) -> int:
         print("  " + label + " " * max(1, 22 - width) + value)
 
     print(f"凝思 Studio {__version__}")
+    row("运行方式", (f"打包 exe（{Path(sys.executable).name}，包内资源 "
+                     f"{Path(getattr(sys, '_MEIPASS', '')).name or '-'}）" if is_frozen()
+                     else "源码运行（python -m ningsi_studio）"))
     row("算法引擎 ningsi", bootstrap.ENGINE_PATH)
     for name, path in (("前端页面 web/index.html", settings.web_dir / "index.html"),
                        ("数据目录", settings.data_dir), ("数据库", db_path)):
@@ -151,6 +151,11 @@ def _demo(args) -> int:
 
 
 def _check(args) -> int:
+    if is_frozen():
+        # 静态自检要读源码树（src/tests/web/docs），打包后这些文件不在包内
+        print("静态自检需要源码树（src/、tests/、web/、docs/），打包后的 exe 里没有；")
+        print("请在源码目录执行：python -m ningsi_studio check")
+        return 2
     from ningsi_studio.tools import static_check
 
     return static_check.main()
@@ -224,11 +229,12 @@ def _simulate_outlet(args) -> int:
 def _ui_check(args) -> int:
     """真实浏览器端到端：起服务 + 起仿真 LSL 流，点按钮、看实时波形。"""
     import runpy
-    from pathlib import Path as _Path
 
-    script = _Path(__file__).resolve().parents[2] / "scripts" / "ui_check.py"
+    script = Path(__file__).resolve().parents[2] / "scripts" / "ui_check.py"
     if not script.exists():
         print(f"找不到界面自检脚本：{script}")
+        if is_frozen():
+            print("（界面自检需要源码树里的 scripts/ui_check.py，打包后的 exe 里没有）")
         return 2
     sys.argv = [str(script)]
     try:
@@ -310,8 +316,13 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):
-        parser.print_help()
-        return 1
+        if is_frozen():
+            # 双击 exe 不会带子命令：默认启动服务并打开浏览器（exe 的常见用法）；
+            # 想只起服务不弹浏览器就写 `ningsi-studio.exe serve`。
+            args = parser.parse_args(["serve", "--open"])
+        else:
+            parser.print_help()
+            return 1
     _quiet_third_party_noise()
     return args.func(args)
 
