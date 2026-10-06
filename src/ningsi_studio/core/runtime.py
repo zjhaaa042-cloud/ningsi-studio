@@ -37,7 +37,23 @@ from ningsi_studio.settings import Settings
 
 LOGGER = logging.getLogger("ningsi_studio.runtime")
 
-INPUT_TIMEOUT_SEC = 900.0        # 交互阶段等待作答的上限（15 分钟）
+INPUT_TIMEOUT_SEC = 900.0        # 交互阶段（量表）等待作答的上限（15 分钟）
+
+#: 行为任务每个试次的**作答窗口**（秒）：窗口结束仍未按键，就按"未作答/正确抑制"记账。
+#:
+#: 为什么必须有：SART 的 No-Go 试次（数字 3）**正确做法就是不按键**，而试次是"服务端发一个、
+#: 前端答一个"驱动的——前端不提交，服务端就会一直 `wait_for_input()` 等到 INPUT_TIMEOUT_SEC
+#: （900 秒），现场看到的就是"显示 3 之后整个任务不动了"。
+#: 窗口同时决定了刺激节拍（固定 SOA）：服务端按窗口补齐间隔，Go 试次与 No-Go 试次间隔一致，
+#: 反应时与变异系数才可比。
+SART_TRIAL_WINDOW = {"practice": 1.6, "main": 2.2}
+PVT_TRIAL_WINDOW = 3.0
+#: 服务端比前端多等这么多：给前端定时器与网络留抖动余量
+TRIAL_GRACE_SEC = 0.6
+#: 折算时间倍率后，作答窗口不得小于这个真实秒数（再快就不可能有人答得上了）
+MIN_TRIAL_WINDOW = 0.35
+#: 连续这么多个试次都没收到作答 ⇒ 判定前端已掉线/关页，让该阶段明确失败（而不是空转 15 分钟）
+BEHAVIOR_MISS_LIMIT = 5
 
 
 class SessionCancelled(RuntimeError):
@@ -84,6 +100,8 @@ class SessionRuntime:
         self.scale_results: dict[str, dict] = {}
         self.baselines: dict = {}
         self.device_error: str | None = None
+        # 行为任务连续"没拿到有效作答"的计数（见 _wait_trial）
+        self._behavior_misses = 0
 
     # ------------------------------------------------------------------ 线程
     def start(self) -> None:
@@ -214,9 +232,13 @@ class SessionRuntime:
 
     def _sleep(self, seconds: float) -> None:
         """按时间倍率休眠；倍率越小演示越快（算法参数不变）。"""
+        self._sleep_real(seconds * self.scale)
+
+    def _sleep_real(self, seconds: float) -> None:
+        """按真实秒休眠（已经是折算过的量，不再乘 time_scale）。"""
         if seconds <= 0:
             return
-        remaining = seconds * self.scale
+        remaining = seconds
         while remaining > 0:
             if self.cancel_event.is_set():
                 raise SessionCancelled()
@@ -497,16 +519,38 @@ class SessionRuntime:
         rng = random.Random(f"auto-scale-{code}")
         return [rng.choice((1, 2, 2, 3)) for _ in range(20)]
 
-    def _wait_trial(self, name: str, payload: dict, *, auto: bool, fallback: dict) -> dict:
-        """交互试次：随机（真实）模式等待前端作答，快速模式用确定性模拟作答。"""
+    def _wait_trial(self, name: str, payload: dict, *, auto: bool, fallback: dict,
+                    window: float) -> dict:
+        """交互试次：随机（真实）模式等待前端作答，快速模式用确定性模拟作答。
+
+        `window` 是该试次的**作答窗口**（秒），会随 `trial` 事件一起下发，前端据此在窗口结束时
+        自动补一笔"未作答"（SART 的 No-Go 试次本来就不该按键，否则服务端会一直等到 900 秒）。
+
+        服务端只等 `window + TRIAL_GRACE_SEC`，并且：
+        - 拿到的作答**必须带匹配的 index**：前端定时器与下一次 `trial` 事件存在竞态，
+          晚到的作答如果对不上当前试次，就按"未作答"记账，绝不能算到下一个试次头上（错记会污染指标）；
+        - 单次超时按"未作答"记账继续跑（丢一帧不该让整段评估失败）；
+        - 连续 `BEHAVIOR_MISS_LIMIT` 次超时才判定前端已掉线并抛错，
+          这样页面关掉时是"约 10 秒后明确失败"，而不是把会话空转 15 分钟。
+        """
+        expected_index = payload.get("index")
+        payload = {**payload, "response_window": round(float(window), 3)}
         self.bus.publish("trial", payload)
         if auto:
-            result = dict(fallback)
-        else:
-            result = self.wait_for_input(name)
-            if not result:
-                raise RuntimeError(f"{payload.get('task')} 试次等待超时或作答缺失")
-        return result
+            self._behavior_misses = 0
+            return dict(fallback)
+        started = time.monotonic()
+        answer = self.wait_for_input(name, timeout=float(window) + TRIAL_GRACE_SEC)
+        if answer and (expected_index is None or answer.get("index") in (None, expected_index)):
+            self._behavior_misses = 0
+            answer["__elapsed"] = time.monotonic() - started
+            return answer
+        self._behavior_misses = getattr(self, "_behavior_misses", 0) + 1
+        if self._behavior_misses >= BEHAVIOR_MISS_LIMIT:
+            raise RuntimeError(
+                f"{payload.get('task')} 连续 {self._behavior_misses} 个试次没有收到有效作答"
+                f"（前端可能已关闭或掉线；最近一次 index={answer.get('index')!r}，期望 {expected_index!r}）")
+        return {"responded": False, "rt": None, "__elapsed": time.monotonic() - started}
 
     def _run_sart(self, auto: bool):
         task = behavior_domain.SartTask(self.subject["public_id"], "01", "001")
@@ -519,18 +563,24 @@ class SessionRuntime:
             nxt = task.next_trial()
             if nxt.get("phase") == "done":
                 break
+            phase = "practice" if nxt.get("phase") == "practice" else "main"
+            # 下发给前端的是**折算过时间倍率的真实秒数**：前端定时器走的是真实时间，
+            # 而演示模式（time_scale<0.2）希望整体节奏跟着快起来，两边必须同一口径。
+            window = max(MIN_TRIAL_WINDOW, SART_TRIAL_WINDOW[phase] * self.scale)
             responded, rt = self._auto_sart_response(nxt["digit"], rng,
                                                      practice=(nxt["phase"] == "practice"))
             answer = self._wait_trial("sart", {"task": "sart", **nxt}, auto=auto,
-                                      fallback={"responded": responded, "rt": rt})
+                                      fallback={"responded": responded, "rt": rt}, window=window)
             task.submit(phase=nxt["phase"], index=nxt["index"],
                         responded=schemas_bool(answer.get("responded")), rt=answer.get("rt"))
             if nxt["phase"] == "main" and (nxt["index"] + 1) % 45 == 0:
                 self._progress("sart", (nxt["index"] + 1) / total,
                                trials_done=nxt["index"] + 1, trials_total=total)
-            # 真实节奏下按刺激时长节拍；自动演示模式不额外等待（算法口径与判定不变）
+            # 固定 SOA：下一个刺激在"本试次发出后 window 秒"出现，与是否按键无关。
+            # 这样 Go 与 No-Go 的刺激间隔一致（反应时/变异系数才可比），
+            # 也不会出现"No-Go 试次把节拍拖长一倍"的问题。window 已折算，故用 _sleep_real。
             if not auto:
-                self._sleep(2.2 if nxt["phase"] == "main" else 1.6)
+                self._sleep_real(max(0.0, window - float(answer.get("__elapsed") or 0.0)))
         result = task.result()
         self._persist_behavior("sart", result, task.trials_payload())
         return result
@@ -556,16 +606,21 @@ class SessionRuntime:
         self.bus.publish("behavior_request", {"task": "pvt", **payload})
         rng = random.Random(f"auto-pvt-{self.uuid}")
         previous = 0.0
-        for onset in payload["onsets"]:
+        onsets = list(payload["onsets"])
+        for position, onset in enumerate(onsets):
             self._check_cancel()
             if not auto:
                 self._sleep(max(0.0, onset - previous))
             previous = onset
             nxt = task.next_trial()
+            # PVT 的作答窗口 = 到下一个刺激的间隔（标准 PVT：可答到下一个刺激出现为止），
+            # 留 0.3s 余量避免与下一次 trial 事件抢跑；最后一个试次用固定窗口。
+            gap = (onsets[position + 1] - onset) if position + 1 < len(onsets) else PVT_TRIAL_WINDOW
+            window = max(MIN_TRIAL_WINDOW, max(0.8, min(PVT_TRIAL_WINDOW, gap - 0.3)) * self.scale)
             responded = rng.random() < 0.99
             rt = round(max(0.18, rng.gauss(0.33, 0.06)), 3) if responded else None
             answer = self._wait_trial("pvt", {"task": "pvt", **nxt}, auto=auto,
-                                      fallback={"responded": responded, "rt": rt})
+                                      fallback={"responded": responded, "rt": rt}, window=window)
             task.submit(index=nxt["index"], responded=schemas_bool(answer.get("responded")),
                         rt=answer.get("rt"), false_start=schemas_bool(answer.get("false_start")))
         result = task.result()

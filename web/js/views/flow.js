@@ -116,7 +116,6 @@ export function render(container, ctx) {
     ]),
   ]);
 
-  const progressHost = el('div');
   const stepHost = el('div');
   const noticeHost = el('div');
   const phaseHost = el('div');
@@ -124,15 +123,18 @@ export function render(container, ctx) {
   const scaleSummaryHost = el('div');
   const tailHost = el('div');
   const taskBarHost = el('div', { class: 'flow-taskbar' });
-  // 「总览」= 进度/当前该做什么/阶段清单/汇总/尾部卡片；被测者作答时整块折叠掉（见 syncTaskMode）。
+  // 「总览」= 当前阶段状态卡 + 阶段清单 + 汇总 + 尾部；被测者作答时整块折叠掉（见 syncTaskMode）。
   // 只折叠显示，不删除节点：中途刷新恢复、阶段留白断言、SSE 更新都不受影响。
+  //
+  // 为什么把"总体进度"并进"当前该做什么"：原来是两张卡，各自重复一遍"当前阶段/百分比/状态/设备"，
+  // 用户反馈"页面混乱"主要就来自这种重复。现在合成一张：顶部一条细进度 + 阶段 x/11，
+  // 下面是这一步要做什么与唯一的主按钮，其余说明收进「本阶段要做什么」折叠区。
   const overviewHost = el('div', { class: 'flow-overview' });
   overviewHost.append(
     stepHost,
-    card('总体进度', progressHost),
     noticeHost,
-    card('全部阶段（点击可查看该阶段说明）', phaseHost, {
-      sub: '等待 / 进行中 / 完成由 SSE 的 phase 事件驱动；快速模式下交互阶段由后端自动作答',
+    card('全部阶段', phaseHost, {
+      sub: '一行一个阶段：左侧序号与名称，右侧状态；点任意一行展开说明',
     }),
     scaleSummaryHost,
     tailHost,
@@ -165,17 +167,16 @@ export function render(container, ctx) {
     container.querySelectorAll('p.muted, .muted').forEach((node) => { node.style.fontSize = '12px'; node.style.margin = '2px 0'; });
     container.querySelectorAll('.stack').forEach((node) => { node.style.gap = '2px'; });
     container.querySelectorAll('.tag-list').forEach((node) => { node.style.gap = '4px'; });
-    // 3) 全部阶段：11 个阶段改三列网格（信息一项不少，只是不再各占一行）
+    // 3) 全部阶段：单列任务清单（一行一个阶段，序号+名称+状态），不再用三列网格——
+    //    三列会把阅读顺序打散、长提示换行后高度参差，用户反馈的"乱"有一部分来自这里。
     const phaseList = container.querySelector('.phase-list');
     if (phaseList) {
-      phaseList.style.display = 'grid';
-      phaseList.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
-      phaseList.style.gap = '4px 10px';
+      phaseList.style.display = 'flex';
+      phaseList.style.flexDirection = 'column';
+      phaseList.style.gap = '2px';
       phaseList.style.margin = '0';
       phaseList.style.padding = '0';
-      // 展开某一项时，网格默认的 align-items: stretch 会把同排其它项拉成同样高，
-      // 内容较短的那些项下方就留下一片带边框的空白。改成 start：每项各自按内容高度。
-      phaseList.style.alignItems = 'start';
+      phaseList.style.alignItems = 'stretch';
     }
     container.querySelectorAll('.phase-item').forEach((item) => {
       item.style.padding = '3px 6px';
@@ -425,9 +426,8 @@ export function render(container, ctx) {
     return `预计 ${fmtSeconds(expected, 0)}${suffix}`;
   };
 
-  /** 统一刷新：步骤面板 + 总进度 + 阶段清单（任何状态变化都走这里）。 */
+  /** 统一刷新：阶段状态卡 + 阶段清单（任何状态变化都走这里）。 */
   const refresh = () => {
-    renderProgress();
     renderPhases();
     renderStep();
   };
@@ -435,6 +435,27 @@ export function render(container, ctx) {
   /* ------------------------------------------------------ 当前该做什么 */
   const renderStep = () => {
     stepHost.textContent = '';
+    const session = ctx.store.state.currentSession || {};
+    const overall = Math.max(0, Math.min(1, Number(pick(session, 'progress', 0)) || 0));
+
+    // 会话结束后不再显示"当前阶段"：11 个阶段全 done 时 currentPhaseKey() 会退化成第 1 个阶段，
+    // 页面就会同时写着"阶段 1/11"和"总进度 100%"，自相矛盾（用户看到的就是这种"乱"）。
+    if (local.finished) {
+      stepHost.append(card('会话已结束', el('div', { class: 'step step--done' }, [
+        el('div', { class: 'step__bar' }, [
+          el('div', { class: 'progress', style: 'flex:1' }, [
+            el('div', { class: 'progress__bar', style: 'width:100%' }),
+          ]),
+          el('span', { class: 'mono step__bar-text', text: `全部 ${local.phaseOrder.length} 个阶段已完成` }),
+        ]),
+        el('div', { class: 'row step__action' }, [
+          button('查看评估报告', () => ctx.navigate(`#/report?session=${uuid}`), { primary: true, small: true }),
+          button('实时监测', () => ctx.navigate(`#/live?session=${uuid}`), { small: true }),
+        ]),
+      ]), { sub: '结论、图表与产物都在“评估报告”里' }));
+      return;
+    }
+
     const key = currentPhaseKey();
     if (!key) return;
     const index = local.phaseOrder.findIndex((phase) => phase.key === key);
@@ -458,9 +479,16 @@ export function render(container, ctx) {
     const stateClass = state === 'running' ? ' step--running' : (state === 'done' ? ' step--done' : '');
 
     const body = [];
+    // 顶部一条细进度 + "阶段 x/11"：全页只保留这一处总体进度，不再单独开一张"总体进度"卡
+    body.push(el('div', { class: 'step__bar' }, [
+      el('div', { class: 'progress', style: 'flex:1' }, [
+        el('div', { class: 'progress__bar', style: `width:${(overall * 100).toFixed(1)}%` }),
+      ]),
+      el('span', { class: 'mono step__bar-text', text: `阶段 ${index + 1}/${local.phaseOrder.length}｜总进度 ${fmtPercent(overall)}` }),
+    ]));
+
     body.push(el('div', { class: 'row row--between step__head' }, [
       el('div', { class: 'row', style: 'gap:10px;align-items:baseline' }, [
-        el('span', { class: 'step__index mono', text: `${index + 1}/${local.phaseOrder.length}` }),
         el('span', { class: 'step__label', text: pick(phase, 'label', key) }),
         interactive ? el('span', { class: 'tag', text: INTERACTIVE_KEY[key] || '需交互' }) : null,
       ]),
@@ -468,11 +496,6 @@ export function render(container, ctx) {
     ]));
 
     body.push(el('p', { class: 'step__headline', text: headline }));
-
-    if (details.length) {
-      body.push(el('ul', { class: 'step__details' },
-        details.map((item) => el('li', { text: item }))));
-    }
 
     const meta = [];
     const timing = describeTiming(phase, state);
@@ -483,17 +506,7 @@ export function render(container, ctx) {
     }
     body.push(el('div', { class: 'step__meta' }, meta));
 
-    if (local.auto && pick(phase, 'auto_note', null)) {
-      body.push(el('p', { class: 'muted step__auto', text: `快速演示：${pick(phase, 'auto_note')}` }));
-    }
-
-    if (state === 'pending' && nextPhase) {
-      body.push(el('p', { class: 'muted step__next', text: `上一步完成后将进入：${pick(nextPhase, 'label', '')}` }));
-    } else if (pick(phase, 'next_hint', null)) {
-      body.push(el('p', { class: 'muted step__next', text: `之后：${pick(phase, 'next_hint')}` }));
-    }
-
-    // 需要被试作答的阶段：把作答区直接带到眼前，并给一句"往下看"的指引
+    // 需要被试作答的阶段：主按钮把作答区带到眼前（唯一的主行动）
     if (interactive && !local.auto) {
       body.push(el('div', { class: 'row step__action' }, [
         button('开始作答 / 查看题目', () => {
@@ -530,32 +543,34 @@ export function render(container, ctx) {
       ]));
     }
 
-    stepHost.append(card('当前该做什么', el('div', { class: `step${stateClass}` }, body), {
-      sub: local.finished ? '会话已结束，可在“评估报告”查看结论与产物' : '按下面的提示做即可，页面会自动进入下一步',
-    }));
-  };
-
-  /* -------------------------------------------------------------- 渲染 */
-  const renderProgress = () => {
-    progressHost.textContent = '';
-    const session = ctx.store.state.currentSession;
-    const progress = pick(session, 'progress', 0);
-    const phase = pick(session, 'phase', null);
-    // 详情接口对终态会话会把 phase_label 退化成原始键，统一交给 phaseText 处理
-    const label = phaseText(phase, pick(session, 'phase_label', null));
-    const bar = el('div', { class: 'progress' }, [
-      el('div', { class: 'progress__bar', style: `width:${(Math.max(0, Math.min(1, Number(progress) || 0)) * 100).toFixed(1)}%` }),
-    ]);
-    progressHost.append(el('div', { class: 'stack' }, [
-      el('div', { class: 'row row--between' }, [
-        el('span', { text: `当前阶段：${label}` }),
-        el('span', { class: 'mono', text: fmtPercent(progress) }),
-      ]),
-      bar,
-      el('p', { class: 'muted', text: `状态：${statusText(pick(session, 'status', null))}｜设备：${pick(session, 'device', DASH)}｜时间倍率：${fmtNum(pick(session, 'time_scale'), 2)}｜采样率：${fmtNum(pick(session, 'srate'), 0)} Hz` }),
-      local.auto ? el('p', { class: 'muted', text: '本次为快速演示模式（time_scale < 0.2）：量表与行为任务由服务端生成确定性作答。' }) : null,
-      local.offline ? el('p', { class: 'muted', text: '实时事件流已断开，正在每 10 秒轮询 /api/sessions/{uuid}/live 兜底。' }) : null,
+    /* 次要信息一律进折叠区（渐进披露）：要点、下一步、快速演示说明、会话与设备信息 */
+    const more = [];
+    if (details.length) {
+      more.push(el('ul', { class: 'step__details' }, details.map((item) => el('li', { text: item }))));
+    }
+    if (state === 'pending' && nextPhase) {
+      more.push(el('p', { class: 'muted step__next', text: `上一步完成后将进入：${pick(nextPhase, 'label', '')}` }));
+    } else if (pick(phase, 'next_hint', null)) {
+      more.push(el('p', { class: 'muted step__next', text: `之后：${pick(phase, 'next_hint')}` }));
+    }
+    if (local.auto && pick(phase, 'auto_note', null)) {
+      more.push(el('p', { class: 'muted step__auto', text: `快速演示：${pick(phase, 'auto_note')}` }));
+    }
+    more.push(el('p', { class: 'muted', text: `会话状态：${statusText(pick(session, 'status', null))}｜设备：${pick(session, 'device', DASH)}｜时间倍率：${fmtNum(pick(session, 'time_scale'), 2)}｜采样率：${fmtNum(pick(session, 'srate'), 0)} Hz` }));
+    if (local.auto) {
+      more.push(el('p', { class: 'muted', text: '本次为快速演示模式（time_scale < 0.2）：量表与行为任务由服务端生成确定性作答。' }));
+    }
+    if (local.offline) {
+      more.push(el('p', { class: 'muted', text: '实时事件流已断开，正在每 10 秒轮询 /api/sessions/{uuid}/live 兜底。' }));
+    }
+    body.push(el('details', { class: 'step__more' }, [
+      el('summary', { text: '本阶段要做什么 / 会话信息' }),
+      el('div', { class: 'stack' }, more),
     ]));
+
+    stepHost.append(card('当前阶段', el('div', { class: `step${stateClass}` }, body), {
+      sub: '按提示做即可，页面会自动进入下一步',
+    }));
   };
 
   const renderPhases = () => {
@@ -565,21 +580,27 @@ export function render(container, ctx) {
     local.phaseOrder.forEach((phase, index) => {
       const state = local.phaseState.get(phase.key) || { state: 'pending', progress: null };
       const interactive = pick(phase, 'interactive', false);
-      const isCurrent = phase.key === current;
-      // 当前步与展开的步默认显示说明，其余折叠——避免一整屏文字让人抓不到重点
-      const expanded = isCurrent || local.expandedPhase === phase.key;
+      const isCurrent = !local.finished && phase.key === current;
+      // 默认全部收起：原来"当前阶段"一行会自动展开一堆说明，整列高度参差、重点被文字淹没；
+      // 现在每行固定一行的"阶段名 + 一句提示 + 状态"，说明要点进（渐进披露）。
+      const expanded = local.expandedPhase === phase.key;
       const duration = Number(pick(phase, 'duration_sec', 0)) || 0;
       const scale = Number(pick(ctx.store.state.currentSession, 'time_scale', 1)) || 1;
       const mark = state.state === 'done' ? '✓' : String(index + 1).padStart(2, '0');
 
-      const detail = [];
-      if (pick(phase, 'headline', null)) {
-        detail.push(el('div', { class: 'phase-item__headline', text: pick(phase, 'headline') }));
-      }
-      if (expanded && pick(phase, 'description', null)) {
-        detail.push(el('div', { class: 'phase-item__desc', text: pick(phase, 'description') }));
-      }
+      // 第一行永远是"序号 + 阶段名 + 一句提示"：原来只显示提示、没有阶段名，用户看不出这是哪一步
+      const detail = [
+        el('div', { class: 'phase-item__title' }, [
+          el('span', { class: 'phase-item__label', text: pick(phase, 'label', phase.key) }),
+          pick(phase, 'headline', null)
+            ? el('span', { class: 'phase-item__headline', text: pick(phase, 'headline') })
+            : null,
+        ]),
+      ];
       if (expanded) {
+        if (pick(phase, 'description', null)) {
+          detail.push(el('div', { class: 'phase-item__desc', text: pick(phase, 'description') }));
+        }
         for (const item of list(pick(phase, 'details', []))) {
           detail.push(el('div', { class: 'phase-item__bullet', text: `· ${item}` }));
         }
@@ -780,18 +801,21 @@ export function render(container, ctx) {
     const slot = ensureTaskSlot(task);
     slot.host.textContent = '';
     const title = task === 'sart' ? 'SART 持续注意任务' : 'PVT-B 警觉度任务';
+    const timer = el('div', { class: 'task-stage__timer', text: '' });
     const stage = el('div', { class: 'task-stage' }, [
       el('div', { class: 'task-stage__digit', text: task === 'sart' && digit !== null ? String(digit) : '•' }),
       el('p', { class: 'muted', text: hint || (task === 'sart'
         ? '看到 1–9 按空格；看到 3 不要按（是否该按由服务端判定）。'
         : '刺激出现后尽快按空格。') }),
       el('p', { class: 'mono', text: `第 ${fmtInt(index)} 试次${total ? ` / ${fmtInt(total)}` : ''}${phaseLabel ? `｜${phaseLabel}` : ''}` }),
+      timer,
     ]);
     slot.host.append(card(title, el('div', {}, [
       stage,
       el('p', { class: 'muted', text: '键盘：空格作答（页面已阻止空格滚动）；反应时按刺激呈现到按键的 performance.now() 差值（秒）上报。' }),
     ])));
     slot.stage = stage;
+    slot.timer = timer;
     return slot;
   };
 
@@ -894,11 +918,56 @@ export function render(container, ctx) {
   // 视图卸载时摘掉监听，避免其它视图误触发
   ctx.onCleanup(() => window.removeEventListener('keydown', onKeyDown));
 
+  /* ------------------------------------------------------ 试次作答窗口 */
+  /* 为什么必须有：试次是"服务端发一个、前端答一个"驱动的，而 SART 的 No-Go 试次
+     （显示 3）**正确做法就是不按键**——没有这一步就永远没有提交，服务端会一直等到
+     INPUT_TIMEOUT_SEC（900 秒），现场看到的就是"显示 3 之后整个任务不动了"。
+     窗口长度由服务端随 trial 事件下发（response_window），前端不硬编码协议参数。 */
+  const DEFAULT_TRIAL_WINDOW = { sart: 2.2, pvt: 3.0 };
+
+  const clearTrialWindow = () => {
+    if (local.trialTicker) {
+      window.clearTimeout(local.trialTicker);
+      local.trialTicker = null;
+    }
+  };
+
+  const paintTimer = (trial, text) => {
+    const slot = local.taskSlots && local.taskSlots.get(trial.task);
+    if (slot && slot.timer) slot.timer.textContent = text;
+  };
+
+  const armTrialWindow = (trial) => {
+    clearTrialWindow();
+    const seconds = Number(trial.responseWindow) > 0
+      ? Number(trial.responseWindow)
+      : (DEFAULT_TRIAL_WINDOW[trial.task] || 2.2);
+    const endsAt = performance.now() + seconds * 1000;
+    const tick = () => {
+      const current = local.trial;
+      if (current !== trial) return;                    // 试次已被替换/结束
+      const remain = (endsAt - performance.now()) / 1000;
+      if (remain <= 0) {
+        local.trialTicker = null;
+        if (!current.answer && !current.posting) {
+          current.answer = { responded: false, rt: null };   // 未按键：Go 记漏报、No-Go 记正确抑制
+          submitTrial();
+        }
+        return;
+      }
+      paintTimer(current, `作答窗口剩余 ${fmtNum(remain, 1)} s`);
+      local.trialTicker = window.setTimeout(tick, 100);
+    };
+    local.trialTicker = window.setTimeout(tick, 100);
+  };
+  ctx.onCleanup(clearTrialWindow);
+
   const submitTrial = async () => {
     const trial = local.trial;
     if (!trial || !trial.answer || trial.posting) return;
     trial.posting = true;
     trial.keyReady = false;
+    clearTrialWindow();
     const { task, phase, index, answer } = trial;
     renderTaskStage(task, {
       digit: trial.digit,
@@ -907,6 +976,10 @@ export function render(container, ctx) {
       phaseLabel: phase === 'practice' ? '练习' : '正式',
       hint: answer.responded ? `已记录：反应时 ${fmtNum(answer.rt, 3)} s` : '本试次未按键',
     });
+    // 注意顺序：renderTaskStage 会重建舞台（含计时节点），所以结果文本要在它之后写
+    paintTimer(trial, answer.responded
+      ? `已作答：反应时 ${fmtNum(answer.rt, 3)} s`
+      : '本试次未按键（按"未作答/正确抑制"记账）');
     if (local.auto) {
       // 快速模式：后端已自行作答，前端不再 POST（避免重复提交与 409）
       local.trial = null;
@@ -950,7 +1023,7 @@ export function render(container, ctx) {
       current.progress = data.progress;
       current.phase_label = (local.phaseOrder.find((phase) => phase.key === data.phase) || {}).label || data.phase;
       ctx.store.setState({ currentSession: current, alerts: list(data.alerts) });
-      renderProgress();
+      renderStep();
     } catch (error) {
       // 轮询失败只在控制台留痕，避免演示时刷屏
       console.warn('[flow] 轮询兜底失败', error);
@@ -1115,6 +1188,7 @@ export function render(container, ctx) {
           onset: at,
           delay: delay + Math.max(0, clockSkew),
           keyReady: true,
+          responseWindow: Number(payload.response_window) || null,
           answer: null,
           posting: false,
         };
@@ -1127,7 +1201,12 @@ export function render(container, ctx) {
             ? (payload.digit !== null ? '按空格作答（是否该按由服务端判定）' : '按空格作答')
             : '刺激出现，尽快按空格',
         });
-        if (payload.phase === 'done') local.trial = null;
+        if (payload.phase === 'done') {
+          local.trial = null;
+          clearTrialWindow();
+        } else {
+          armTrialWindow(local.trial);   // 窗口到点自动补"未作答"，服务端才能继续推进
+        }
         break;
       }
       case 'behavior': {
@@ -1397,14 +1476,14 @@ export function render(container, ctx) {
     onOpen: () => {
       if (local.offline) {
         local.offline = false;
-        renderProgress();
+        renderStep();
       }
     },
     onError: () => {
       // 断线兜底：切到 10 秒轮询 /live，恢复后由 onOpen 切回
       if (!local.offline) {
         local.offline = true;
-        renderProgress();
+        renderStep();
       }
     },
   });

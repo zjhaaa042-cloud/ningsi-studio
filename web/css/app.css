@@ -304,6 +304,28 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 
 .flow--task .flow-overview { display: none; }
 
+/* 当前阶段卡：一条细进度 + 阶段名 + 一句该做什么 + 唯一主按钮，其余进折叠区。
+   设计依据：GOV.UK 任务清单模式（长流程用"步骤 + 状态"表达，页面只留一个主行动）
+   https://design-system.service.gov.uk/components/task-list/
+   Material 步进器（进度用"第 x 步 / 共 y 步"表达，不与内容混排）
+   https://m1.material.io/components/steppers.html */
+.step__bar { display: flex; align-items: center; gap: 10px; }
+.step__bar-text { font-size: 11.5px; color: var(--text-3); white-space: nowrap; }
+.step__more { margin-top: 6px; }
+.step__more > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 2px 0;
+}
+.step__more > summary:hover { color: var(--text-2); }
+.step__more > .stack { margin-top: 6px; }
+
+/* 全部阶段 = 单列任务清单：一行一个阶段（序号 + 阶段名 + 一句提示 ⋯ 状态） */
+.phase-item__title { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.phase-item__label { font-weight: 600; }
+.phase-item__headline { color: var(--text-3); }
+
 /* 任务视图下，交互区里"不是当前任务"的历史卡片（设备质检结果 / 最近一窗波形 / 基线…）
    也一并折叠：实测这些卡会占掉作答卡上方 ~830px，作答卡因此掉出第一屏。 */
 .flow--task .flow-task-hidden { display: none; }
@@ -417,6 +439,14 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 }
 
 .task-stage__hint { color: var(--text-3); font-size: 12px; }
+
+/* 试次作答窗口：到点未按键会按"未作答/正确抑制"记账并自动推进（SART 的 No-Go 就是"别按"） */
+.task-stage__timer {
+  color: var(--text-3);
+  font-size: 12px;
+  min-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ------------------------------------------------------------------ 表单 */
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }

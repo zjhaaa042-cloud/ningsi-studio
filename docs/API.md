@@ -197,7 +197,17 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `scale_request` | `code, label, size, instruction` |
 | `scale_scored` | `code, raw_score, standard_score, level` |
 | `behavior_request` | `task, digits[], nogo_trials, practice[], sequence_set_id, seed, instruction`（PVT 为 `trials, onsets[], duration_sec, lapse_sec, instruction`） |
-| `trial` | SART：`phase(practice/main/done), index, digit, total`；PVT：`index, onset, total` |
+| `trial` | SART：`phase(practice/main/done), index, digit, total, response_window`；PVT：`index, onset, total, response_window` |
+
+> **`trial.response_window`（秒，真实时间）**：本试次的作答窗口。它是试次能否推进的关键——
+> 试次是"服务端发一个、前端答一个"驱动的，而 **SART 的 No-Go 试次（显示 3）正确做法就是不按键**；
+> 前端必须在窗口到点时自动补交一笔 `{responded:false, rt:null}`（Go 记漏报、No-Go 记正确抑制），
+> 否则服务端会一直等到 `INPUT_TIMEOUT_SEC`（900 秒），现场看到的就是"显示 3 之后任务不动了"。
+> 该值已按 `time_scale` 折算（演示模式整体节奏变快），且不小于 0.35 秒。
+> 服务端自身只等 `response_window + 0.6s`，并校验提交里的 `index` 必须与当前试次一致
+> （晚到的作答按"未作答"记账，不会算到下一试次头上）；单次超时按未作答继续，
+> 连续 5 次才判定前端掉线并使该阶段失败。
+
 | `behavior` | `task, result{...}` |
 | `monitor` | `summary, quality` |
 | `feedback` | `segment, target, score, on_target, usable, t` |
