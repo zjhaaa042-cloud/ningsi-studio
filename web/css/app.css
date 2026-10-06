@@ -412,10 +412,41 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 .phase-item .right { display: flex; align-items: center; gap: 8px; }
 
 /* ------------------------------------------------------------ 量表答题 */
-.scale-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
-.scale-item:last-of-type { border-bottom: none; }
-.scale-item__text { margin: 0 0 8px; }
+/* 一次一题：只有 .scale-item--current 可见，其余题目仍在 DOM（验收按 DOM 断言"20 题全渲染"，
+   也是"题干来自后端定义"的证明；同时刷新/重放不需要重新取题干）。 */
+.scale-item { display: none; padding: 4px 0 12px; border-bottom: none; }
+.scale-item--current { display: block; }
+.scale-item__text { margin: 0 0 12px; font-size: 16px; line-height: 1.6; }
 .scale-options { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.scale-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.scale-nav { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0 14px; }
+.scale-nav__chip {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.scale-nav__chip:hover { border-color: var(--line-strong); color: var(--text-2); }
+.scale-nav__chip.is-answered { color: var(--text); border-color: var(--line-strong); }
+.scale-nav__chip.is-current { color: var(--text); border-color: var(--text-2); font-weight: 600; }
+.scale-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
 
 .scale-option {
   display: inline-flex;

@@ -715,14 +715,61 @@ export function render(container, ctx) {
     return slot;
   };
 
+  /** 量表作答：一次一题（GOV.UK "one thing per page" 的做法）。
+   *
+   *  为什么改：20/40 题的问卷原来是一整屏长表单，题目区高达 1300+px，被试要一路滚到底才知道
+   *  还剩多少题、提交按钮在哪。现在一屏只呈现一道题 + 题号条 + 进度，整张卡控制在视口内。
+   *
+   *  关键约束：**所有题目仍然全部渲染在 DOM 里**（只是非当前题 `display:none`）——
+   *  ① 验收脚本按 DOM 断言"20 题全渲染 / 每题 4 个选项 / radios=80"，这是"题干来自后端定义"
+   *  的证明，不能被削弱；② 中途刷新/SSE 重放时不需要重新取题干。
+   */
   const renderScaleForm = (slot, label, size, instruction) => {
     const definition = slot.definition || {};
     const items = list(definition.items);
     const options = list(definition.options);
+    const total = items.length || Number(size) || 20;
     const answers = new Map();
     const optionNodes = [];
+    const itemNodes = [];
+    const chips = [];
+    let current = 0;
 
-    const itemNodes = items.map((item) => {
+    const questionHost = el('div', { class: 'scale-steps' });
+    const navHost = el('div', { class: 'scale-nav' });
+    const progressText = el('span', { class: 'muted' });
+    const prev = button('上一题', () => go(current - 1, { focus: true }), { small: true });
+    const next = button('下一题', () => go(current + 1, { focus: true }), { small: true });
+
+    /** 跳转到第 index 题（越界自动夹住）；只切换可见性，DOM 里 20 题始终都在。 */
+    const go = (index, options2 = {}) => {
+      const clamped = Math.max(0, Math.min(items.length - 1, Number(index) || 0));
+      current = clamped;
+      itemNodes.forEach((node, position) => {
+        node.classList.toggle('scale-item--current', position === clamped);
+      });
+      chips.forEach((chip, position) => chip.classList.toggle('is-current', position === clamped));
+      prev.disabled = clamped <= 0;
+      next.disabled = clamped >= items.length - 1;
+      updateSubmitState();
+      if (options2.focus && itemNodes[clamped]) {
+        // 让读屏/键盘用户落在当前题上；不用 scrollIntoView，卡片本来就是短的
+        itemNodes[clamped].setAttribute('tabindex', '-1');
+        itemNodes[clamped].focus({ preventScroll: true });
+      }
+    };
+
+    const firstUnansweredFrom = (start) => {
+      for (let position = Math.max(0, start); position < items.length; position += 1) {
+        if (!answers.has(items[position].index)) return position;
+      }
+      for (let position = 0; position < items.length; position += 1) {
+        if (!answers.has(items[position].index)) return position;
+      }
+      return -1;
+    };
+
+    items.forEach((item, position) => {
       const name = `scale-${slot.code}-${item.index}`;
       const optionsRow = el('div', { class: 'scale-options' });
       for (const option of options) {
@@ -730,31 +777,75 @@ export function render(container, ctx) {
           type: 'radio',
           name,
           value: String(option.value),
+          id: `${name}-opt-${option.value}`,
         });
         input.addEventListener('change', () => {
           answers.set(item.index, Number(option.value));
           updateSubmitState();
+          // 选完自动跳到下一道未答题（都答完了就停在原地，等被试确认后提交）
+          const nextUnanswered = firstUnansweredFrom(position + 1);
+          if (nextUnanswered >= 0 && nextUnanswered !== position) go(nextUnanswered, { focus: true });
         });
         optionNodes.push(input);
-        optionsRow.append(el('label', { class: 'scale-option' }, [input, el('span', { text: `${option.value}. ${option.text}` })]));
+        optionsRow.append(el('label', {
+          class: 'scale-option',
+          for: input.id,
+        }, [input, el('span', { text: `${option.value}. ${option.text}` })]));
       }
-      return el('div', { class: 'scale-item' }, [
+      const node = el('div', { class: 'scale-item' }, [
         el('p', { class: 'scale-item__text', text: `${item.index}. ${item.text}` }),
         optionsRow,
       ]);
+      itemNodes.push(node);
+      questionHost.append(node);
+
+      const chip = el('button', {
+        class: 'scale-nav__chip',
+        type: 'button',
+        text: String(item.index),
+        title: `第 ${item.index} 题`,
+        attrs: { 'aria-label': `跳到第 ${item.index} 题` },
+        onClick: () => go(position, { focus: true }),
+      });
+      chips.push(chip);
+      navHost.append(chip);
     });
 
-    const submit = button(`提交 ${slot.code}（${answers.size}/${items.length || size || 20}）`, null, { primary: true, disabled: true });
+    const submit = button(`提交 ${slot.code}（${answers.size}/${total}）`, null, { primary: true, disabled: true });
     const status = el('span', { class: 'muted' });
 
     const updateSubmitState = () => {
-      const total = items.length || Number(size) || 20;
       submit.textContent = `提交 ${slot.code}（${answers.size}/${total}）`;
       submit.disabled = answers.size !== total || slot.submitted;
+      progressText.textContent = `第 ${current + 1} / ${total} 题｜已答 ${answers.size}/${total}`
+        + (answers.size === total ? '｜已全部作答，可提交' : '');
+      chips.forEach((chip, position) => {
+        chip.classList.toggle('is-answered', answers.has(items[position].index));
+      });
     };
 
+    // 键盘：←/→ 翻题，1–4 直接选当前题的选项（不干扰输入框里的数字/方向键）
+    const onScaleKey = (event) => {
+      if (ctx.signal.aborted || slot.submitted) return;
+      const tag = (event.target && event.target.tagName) || '';
+      if (tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (tag === 'INPUT' && (event.target.type === 'text' || event.target.type === 'search' || event.target.type === 'number')) return;
+      if (event.key === 'ArrowLeft') { go(current - 1, { focus: true }); event.preventDefault(); return; }
+      if (event.key === 'ArrowRight') { go(current + 1, { focus: true }); event.preventDefault(); return; }
+      const picked = Number(event.key);
+      if (Number.isInteger(picked) && picked >= 1 && picked <= options.length) {
+        const target = itemNodes[current] && itemNodes[current].querySelectorAll('input[type=radio]')[picked - 1];
+        if (target) {
+          target.checked = true;
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+          event.preventDefault();
+        }
+      }
+    };
+    window.addEventListener('keydown', onScaleKey);
+    ctx.onCleanup(() => window.removeEventListener('keydown', onScaleKey));
+
     submit.addEventListener('click', async () => {
-      const total = items.length || Number(size) || 20;
       const responses = [];
       for (let index = 1; index <= total; index += 1) responses.push(answers.get(index));
       if (responses.includes(undefined)) {
@@ -780,9 +871,17 @@ export function render(container, ctx) {
     slot.host.append(card(`${label || definition.name || slot.code}（${slot.code}）`, el('div', {}, [
       el('p', { class: 'muted', text: instruction || SCALE_INSTRUCTION_FALLBACK }),
       definition.note ? el('p', { class: 'muted', text: definition.note }) : null,
-      ...itemNodes,
-      el('div', { class: 'row row--between', style: 'margin-top:12px' }, [status, submit]),
+      // 一次一题：题号条（已答/当前可点）+ 当前题 + 翻页/提交；20 题全在 DOM，只是非当前题不显示
+      el('div', { class: 'scale-head' }, [progressText]),
+      navHost,
+      questionHost,
+      el('div', { class: 'scale-foot' }, [
+        el('div', { class: 'row' }, [prev, next]),
+        el('div', { class: 'row' }, [status, submit]),
+      ]),
+      el('p', { class: 'muted', text: '键盘：← / → 翻题，1–4 直接选当前题选项；选完会自动跳到下一道未答题。' }),
     ]), { sub: `${definition.name || ''}｜版本 ${definition.version || DASH}｜${items.length || size || DASH} 题｜反向题 ${list(definition.reverse_items).length} 项` }));
+    go(0);
   };
 
   /* ------------------------------------------------------ 行为任务区 */
