@@ -254,8 +254,8 @@ export function drawGauge(container, value, options = {}) {
   // 视觉上把整行撑开（用 .chart--gauge 限制最大宽度，见 css/app.css）
   const { root } = canvas(width, height, [10, 10, 10, 10], options.label || '仪表', 'chart--gauge');
   const cx = width / 2;
-  const cy = 140;
-  const radius = 96;
+  const cy = 150;
+  const radius = 92;
   const usable = typeof value === 'number' && Number.isFinite(value);
   const ratio = usable ? Math.max(0, Math.min(1, value)) : 0;
 
@@ -281,17 +281,24 @@ export function drawGauge(container, value, options = {}) {
     }));
   }
 
+  /* 刻度线与刻度数字的布局（2026-10-06 修）：
+     原来刻度线画在色带**内侧** 74→68px（带宽 89~103），数字画在半径 58px 处——
+     结果五条短线悬在中间、五组数字与圆心的大号数值/单位挤在一起，看图像"一团"。
+     现在：刻度线**跨在色带上**（r±9），数字放到色带**外侧**（r+24），圆心只留数值与单位。 */
+  const tickInner = radius - 9;
+  const tickOuter = radius + 9;
+  const labelRadius = radius + 24;
   for (let index = 0; index <= 4; index += 1) {
     const fraction = index / 4;
     const angle = Math.PI * (1 - fraction);
-    const inner = radius - 22;
     root.append(svgEl('line', {
-      x1: cx + inner * Math.cos(angle), y1: cy - inner * Math.sin(angle),
-      x2: cx + (inner - 6) * Math.cos(angle), y2: cy - (inner - 6) * Math.sin(angle),
+      x1: cx + tickInner * Math.cos(angle), y1: cy - tickInner * Math.sin(angle),
+      x2: cx + tickOuter * Math.cos(angle), y2: cy - tickOuter * Math.sin(angle),
       class: 'chart__axis',
     }));
     root.append(svgEl('text', {
-      x: cx + (inner - 16) * Math.cos(angle), y: cy - (inner - 16) * Math.sin(angle) + 3,
+      x: cx + labelRadius * Math.cos(angle),
+      y: cy - labelRadius * Math.sin(angle) + 4,
       class: 'chart__tick', 'text-anchor': 'middle',
     }, [document.createTextNode(String(index * 25))]));
   }
@@ -299,17 +306,17 @@ export function drawGauge(container, value, options = {}) {
   if (typeof options.target === 'number' && Number.isFinite(options.target)) {
     const angle = Math.PI * (1 - Math.max(0, Math.min(1, options.target)));
     root.append(svgEl('line', {
-      x1: cx + (radius - 26) * Math.cos(angle), y1: cy - (radius - 26) * Math.sin(angle),
-      x2: cx + (radius + 10) * Math.cos(angle), y2: cy - (radius + 10) * Math.sin(angle),
+      x1: cx + (radius - 22) * Math.cos(angle), y1: cy - (radius - 22) * Math.sin(angle),
+      x2: cx + (radius + 12) * Math.cos(angle), y2: cy - (radius + 12) * Math.sin(angle),
       class: 'chart__target',
     }));
   }
 
   root.append(svgEl('text', {
-    x: cx, y: cy - 18, class: 'chart__label', 'text-anchor': 'middle', 'font-size': 30,
+    x: cx, y: cy - 12, class: 'chart__label', 'text-anchor': 'middle', 'font-size': 30,
   }, [document.createTextNode(usable ? `${Math.round(ratio * 100)}` : DASH)]));
   root.append(svgEl('text', {
-    x: cx, y: cy + 6, class: 'chart__tick', 'text-anchor': 'middle',
+    x: cx, y: cy + 14, class: 'chart__tick', 'text-anchor': 'middle',
   }, [document.createTextNode(usable ? '分' : '不可用')]));
   container.append(root);
   // 说明放在 SVG 之外：viewBox 只有 320 宽，长文案写进 SVG 会溢出控件边界

@@ -161,19 +161,33 @@ export async function render(container, ctx) {
   // 质检可用窗比例用仪表盘再画一遍：评审时需要"一眼看出质量是否达标"
   // 门槛值读 config.quality.valid_ratio_min（原来是写死的 0.6，与文案"取自 config.quality"不符）
   if (quality) {
-    const gaugeHost = el('div');
+    const gaugeHost = el('div', { class: 'gauge-host' });
     const rawRatio = pick(quality, 'valid_ratio', null);
+    const ratio = typeof rawRatio === 'number' && Number.isFinite(rawRatio) ? rawRatio : null;
     const threshold = typeof validRatioMin === 'number' && Number.isFinite(validRatioMin) ? validRatioMin : null;
-    drawGauge(gaugeHost, typeof rawRatio === 'number' && Number.isFinite(rawRatio) ? rawRatio : null, {
+    drawGauge(gaugeHost, ratio, {
       color: SERIES_COLORS[2],
       target: threshold,
-      note: threshold === null
-        ? '门槛：config.quality.valid_ratio_min 未配置'
-        : `门槛 ${fmtPercent(threshold)}（config.quality.valid_ratio_min）`,
+      // 说明不放仪表下面，改为右侧一行"门槛"，避免整张卡只有中间一个控件、两侧全空
       label: '质检可用窗比例仪表',
     });
-    page.append(card('采集质量', gaugeHost, {
-      sub: `可用窗 ${fmtInt(pick(quality, 'usable'))}/${fmtInt(pick(quality, 'windows'))}｜${pick(quality, 'passed') ? '质检通过' : '未达门槛，结果解释需谨慎'}`,
+    // 仪表 + 关键数字并排：卡片是全页宽，只放一个 320px 的仪表会让整张卡看着"空"
+    const fact = (label, value) => el('div', { class: 'gauge-fact' }, [
+      el('span', { class: 'gauge-fact__label', text: label }),
+      value instanceof Node ? value : el('span', { class: 'gauge-fact__value mono', text: value }),
+    ]);
+    const facts = el('div', { class: 'gauge-facts' }, [
+      fact('可用窗', `${fmtInt(pick(quality, 'usable'))}/${fmtInt(pick(quality, 'windows'))}`),
+      fact('可用窗比例', fmtPercent(ratio)),
+      fact('门槛', threshold === null ? '未配置' : fmtPercent(threshold)),
+      fact('判定', el('span', {
+        class: 'badge' + (pick(quality, 'passed') ? ' badge--strong' : ''),
+        text: pick(quality, 'passed') ? '质检通过' : '未达门槛',
+      })),
+      fact('来源', 'config.quality.valid_ratio_min'),
+    ]);
+    page.append(card('采集质量', el('div', { class: 'gauge-row' }, [gaugeHost, facts]), {
+      sub: '数据来自最近一次已完成会话的 qc 记录（GET /api/sessions/{uuid} → runs[phase=qc]）',
     }));
   } else {
     page.append(card('采集质量', [

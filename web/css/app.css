@@ -517,6 +517,25 @@ button.btn--sm { padding: 4px 9px; font-size: 12px; }
 /* 仪表：viewBox 宽 320，限宽 320 即为 1:1 像素渲染（不再被整行宽度等比放大） */
 .chart--gauge { max-width: 320px; margin-left: auto; margin-right: auto; }
 
+/* 仪表 + 关键数字并排：卡片是全页宽，只放一个 320px 的仪表会让整张卡看着"空"。
+   整行给一个上限并居中，左右留白对称，看起来是"刻意的居中控件"而不是"没填满"。 */
+.gauge-row { display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+  max-width: 880px; margin: 0 auto; }
+.gauge-row .gauge-host { flex: 0 0 auto; }
+.gauge-row .chart--gauge { margin-left: 0; margin-right: 0; }
+.gauge-facts { flex: 1 1 240px; min-width: 200px; max-width: 480px; display: grid; gap: 2px; }
+.gauge-fact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 2px;
+  border-bottom: 1px dashed var(--line);
+}
+.gauge-fact:last-child { border-bottom: none; }
+.gauge-fact__label { color: var(--text-3); font-size: 12px; }
+.gauge-fact__value { font-size: 13px; }
+
 /* 仪表说明放在 SVG 外：长文案不会再溢出控件边界 */
 .chart__note { margin: 6px 0 0; text-align: center; }
 
