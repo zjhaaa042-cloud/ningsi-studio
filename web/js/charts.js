@@ -266,7 +266,13 @@ export function drawGauge(container, value, options = {}) {
     const y1 = cy - r * Math.sin(angleFrom);
     const x2 = cx + r * Math.cos(angleTo);
     const y2 = cy - r * Math.sin(angleTo);
-    const largeArc = Math.abs(to - from) > 0.5 ? 1 : 0;
+    /* large-arc-flag 必须恒为 0（2026-10-06 修）。
+       半圆仪表的弧最大就是 180°（0%→100%），永远不会"大于 180°"。
+       原来写成 `|to-from| > 0.5 ? 1 : 0`：值 >50% 时置 1，于是浏览器按"这段弧超过 180°"去解——
+       两端点 + 半径 92 会解出**另一个圆心**，绿色值弧就鼓到灰色轨道外侧（还因为 svg 是
+       `overflow: visible` 而溢出卡片）。用户看到的"采集质量的仪表盘显示有问题"就是这个：
+       值 80% 时绿弧与灰轨道不同心，看着像两个半径不同的环。 */
+    const largeArc = 0;
     return `M${x1.toFixed(2)} ${y1.toFixed(2)} A${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
   };
 
@@ -305,9 +311,11 @@ export function drawGauge(container, value, options = {}) {
 
   if (typeof options.target === 'number' && Number.isFinite(options.target)) {
     const angle = Math.PI * (1 - Math.max(0, Math.min(1, options.target)));
+    // 门槛刻度两端都伸出色带（色带只占 r±7），这样它读起来是"标记"而不是"在弧上划了道口子"；
+    // 值弧会盖住门槛时它仍然可见（画在值弧之后）。
     root.append(svgEl('line', {
-      x1: cx + (radius - 22) * Math.cos(angle), y1: cy - (radius - 22) * Math.sin(angle),
-      x2: cx + (radius + 12) * Math.cos(angle), y2: cy - (radius + 12) * Math.sin(angle),
+      x1: cx + (radius - 24) * Math.cos(angle), y1: cy - (radius - 24) * Math.sin(angle),
+      x2: cx + (radius + 18) * Math.cos(angle), y2: cy - (radius + 18) * Math.sin(angle),
       class: 'chart__target',
     }));
   }
