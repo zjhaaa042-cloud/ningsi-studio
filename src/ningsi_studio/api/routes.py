@@ -202,6 +202,12 @@ def build_router(settings: Settings) -> Router:
     def health(request: Request) -> Response:
         with store.read_only(db_path) as conn:
             overview = repo.overview(conn)
+        # 默认数据源一并给出：首页（尚未选择会话）时顶栏的"数据来源/设备"靠它渲染，
+        # 否则只能显示 `—`，看起来像坏了；这里不扫 LSL（health 要快），用默认源。
+        default_source = live_source.default_source_info()
+        overview["source"] = default_source["key"]
+        overview["source_kind"] = default_source["kind"]
+        overview["source_note"] = default_source["note"]
         return Response.json({
             "status": "ok",
             "service": "ningsi-studio",
@@ -1023,6 +1029,10 @@ def build_router(settings: Settings) -> Router:
             payload["subjects"] = max(payload["subjects"], total)
         sources = live_source.list_available(0.2)
         payload["source_note"] = sources[0].get("note") if sources else None
+        # 同样补上"默认数据源"的键与类别：前端 sourceText() 需要 kind 才敢写「数据来源：仿真」，
+        # 只给 note 会退化成显示设备串（O1 那条缺陷就是这么来的）。
+        payload["source"] = sources[0].get("key") if sources else None
+        payload["source_kind"] = sources[0].get("kind") if sources else None
         payload["active_sessions"] = manager.active_uuids()
         return Response.json(payload)
 

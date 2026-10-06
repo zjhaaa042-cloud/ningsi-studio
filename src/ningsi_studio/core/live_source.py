@@ -64,6 +64,17 @@ class SourceInfo:
                 "real": self.is_real}
 
 
+def default_source_info() -> dict:
+    """新会话会用的默认数据源（不扫 LSL，供 /api/health、/api/overview 与顶栏用）。
+
+    为什么需要：建会话时 `device` 缺省就是 `sim-bsense`，但界面在"尚未选择会话"时
+    顶栏只能显示 `数据来源：—`、`设备：—`，看起来像坏了；这里给出默认源，
+    让"新会话将使用仿真源"这件事在首页就说清楚（仿真必须显式标注）。
+    """
+    return SourceInfo(SIM_SOURCE, "sim", 250.0, 1, SIM_SOURCE,
+                      "仿真脑电源：无设备联调、演示与自动化测试使用", None).as_dict()
+
+
 def list_available(probe_seconds: float = 2.0) -> list[dict]:
     """列出可用数据源：永远含仿真源；装了 pylsl 时再扫描真实 LSL 流。"""
     note = "仿真脑电源：无设备联调、演示与自动化测试使用"

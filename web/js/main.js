@@ -165,7 +165,8 @@ function updateHeader() {
   const session = state.currentSession || {};
 
   // 数据来源：会话运行时的 source_kind 优先（更贴近当前会话），否则用 /api/health 的概览
-  const kind = runtime.source_kind || null;
+  // （health.overview.source_kind 由后端显式给出，未选择会话时也能正确写成"数据来源：仿真"）
+  const kind = runtime.source_kind || pick(health, 'overview.source_kind', null) || null;
   const note = runtime.source_note || pick(health, 'overview.source_note', null);
   const deviceKey = pick(session, 'device', null) || pick(health, 'overview.source', null);
   // 历史已结束会话的 runtime.source_kind 可能是空的：按设备键兜底判定类别，

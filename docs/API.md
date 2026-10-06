@@ -83,8 +83,12 @@
 （界面上显示为缺失色块），不会拿旧数据继续算指标。
 
 ### `GET /api/overview`
-首页统计 + 最近会话 `latest_detail` + 最近被试 `subjects_recent` + `active_sessions` + `source_note`
-（当前默认数据源的说明文案，供顶栏展示）。
+首页统计 + 最近会话 `latest_detail` + 最近被试 `subjects_recent` + `active_sessions` +
+`source` / `source_kind` / `source_note`（**默认数据源**的键、类别与说明文案，供顶栏展示：
+未选择会话时顶栏也要能写出「数据来源：仿真」，而不是一个 `—`）。
+
+> `GET /api/health` 里的 `overview` 同样带 `source` / `source_kind` / `source_note`
+> （取自默认源，不扫 LSL，保证 health 快），键名一致，前端 boot 时只读这一处即可。
 
 ### `GET /api/sessions` 与列表类响应的分页约定
 `{"items": [...], "total": N, "limit": L, "page": P}`；`page` 从 1 开始，`limit` 上限 200。
@@ -198,16 +202,6 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `scale_scored` | `code, raw_score, standard_score, level` |
 | `behavior_request` | `task, digits[], nogo_trials, practice[], sequence_set_id, seed, instruction`（PVT 为 `trials, onsets[], duration_sec, lapse_sec, instruction`） |
 | `trial` | SART：`phase(practice/main/done), index, digit, total, response_window`；PVT：`index, onset, total, response_window` |
-
-> **`trial.response_window`（秒，真实时间）**：本试次的作答窗口。它是试次能否推进的关键——
-> 试次是"服务端发一个、前端答一个"驱动的，而 **SART 的 No-Go 试次（显示 3）正确做法就是不按键**；
-> 前端必须在窗口到点时自动补交一笔 `{responded:false, rt:null}`（Go 记漏报、No-Go 记正确抑制），
-> 否则服务端会一直等到 `INPUT_TIMEOUT_SEC`（900 秒），现场看到的就是"显示 3 之后任务不动了"。
-> 该值已按 `time_scale` 折算（演示模式整体节奏变快），且不小于 0.35 秒。
-> 服务端自身只等 `response_window + 0.6s`，并校验提交里的 `index` 必须与当前试次一致
-> （晚到的作答按"未作答"记账，不会算到下一试次头上）；单次超时按未作答继续，
-> 连续 5 次才判定前端掉线并使该阶段失败。
-
 | `behavior` | `task, result{...}` |
 | `monitor` | `summary, quality` |
 | `feedback` | `segment, target, score, on_target, usable, t` |
@@ -220,6 +214,18 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `cancelled` | `message` |
 | `error` | `message, detail` |
 | `finished` | `status(done/failed/cancelled), error, summary` |
+
+> **`trial.response_window`（秒，真实时间）**：本试次的作答窗口，是试次能否推进的关键——
+> 试次是"服务端发一个、前端答一个"驱动的，而 **SART 的 No-Go 试次（显示 3）正确做法就是不按键**；
+> 前端必须在窗口到点时自动补交一笔 `{responded:false, rt:null}`（Go 记漏报、No-Go 记正确抑制），
+> 否则服务端会一直等到 `INPUT_TIMEOUT_SEC`（900 秒），现场看到的就是"显示 3 之后任务不动了"。
+> 该值已按 `time_scale` 折算（演示模式整体节奏变快），且不小于 0.35 秒。
+> 服务端自身只等 `response_window + 0.6s`，并校验提交里的 `index` 必须与当前试次一致
+> （晚到的作答按"未作答"记账，不会算到下一试次头上）；单次超时按未作答继续，
+> 连续 5 次才判定前端掉线并使该阶段失败。
+>
+> 注：本说明必须放在事件表**之外**——表格中间夹引用块或空行会把 Markdown 表格截断，
+> `ningsi_studio check` 的"文档事件"统计会掉（本文件被踩过一次：23 → 11）。
 
 重连：带上 `Last-Event-ID: <id>` 头（或 `?last_event_id=`）即可补发漏掉的事件；
 不带 id 订阅时只补发"快照类"事件（阶段快照 `phase`，会话已结束时还有 `finished`），
