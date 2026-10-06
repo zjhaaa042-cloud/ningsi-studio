@@ -431,6 +431,21 @@ def build_router(settings: Settings) -> Router:
             with store.connect(db_path) as conn:
                 repo.update_session(conn, row["uuid"], source=actual_source)
                 row = repo.get_session(conn, row["uuid"])
+        # 采样率与通道数同样要以**真实流描述符**为准：建会话时调用方只知道设备名，
+        # `channels` 默认 1、`srate` 默认 250；而真实流声明的可能是 2 通道/500 Hz。
+        # 不回写就会出现"库里 1 通道、界面按 2 通道画、报告写 1 通道"的三套口径
+        # （真机实测 BioMulti Lite 声明 2 通道，见 _analysis/lsl-hardware/units.json）。
+        runtime_source = getattr(runtime, "source", None)
+        if runtime_source is not None and getattr(runtime_source, "kind", None) == "lsl":
+            actual_srate = float(getattr(runtime_source, "srate", 0.0) or 0.0)
+            actual_channels = int(getattr(runtime_source, "channels", 0) or 0)
+            changed = (actual_channels > 0 and actual_channels != int(row["channels"] or 0)) or (
+                actual_srate > 0 and abs(actual_srate - float(row["srate"] or 0.0)) > 1e-6)
+            if changed:
+                with store.connect(db_path) as conn:
+                    repo.update_session(conn, row["uuid"], srate=actual_srate or row["srate"],
+                                        channels=actual_channels or row["channels"])
+                    row = repo.get_session(conn, row["uuid"])
         return Response.json({
             "session": session_public(row, extra={"participant": public_id}),
             "events_url": f"/api/sessions/{row['uuid']}/events",
@@ -555,6 +570,13 @@ def build_router(settings: Settings) -> Router:
 
         source = getattr(runtime, "source", None)
         engine = getattr(source, "engine", None) if source is not None else None
+        # 真机调理链是纯 Python 双二阶，成本与窗长线性相关（2 通道 10 秒窗 ≈ 30 ms/帧，
+        # 见 `ningsi/_analysis/lead_bench_preprocess.py`）；10 FPS 的显示通道按长窗调理会把
+        # 推帧线程吃满。这里把显示跨度压到调理上下文长度内，帧里回报的 window_sec 同步变小
+        # （前端按 frame.window_sec 定标，见 charts.js），因此不会出现"标签 10 秒、实际 6 秒"。
+        condition_seconds = float(getattr(engine, "condition_seconds", 0.0) or 0.0)
+        if condition_seconds > 0:
+            window_sec = min(window_sec, condition_seconds)
         srate = float(getattr(source, "srate", 0.0) or 250.0)
         channels = int(getattr(source, "channels", 1) or 1)
         labels = list(getattr(source, "channel_labels", []) or [])
@@ -564,8 +586,12 @@ def build_router(settings: Settings) -> Router:
         def samples_provider(seconds: float):
             # ManagedLslSource / SyntheticEEG 都通过 .window(state, seconds) 取数；
             # 真实流走缓冲切片（不阻塞），仿真源即时生成，两者接口一致。
+            # 显示通道关掉"有限等待"：真机缓冲未填满时 window() 最多阻塞 fill_timeout(2 秒)，
+            # 会把 10 FPS 的推帧拖到 0.5 FPS（指标链路仍走带等待的默认行为）。
             if engine is None:
                 raise RuntimeError("该会话没有可用的数据源")
+            if hasattr(engine, "condition_seconds"):
+                return engine.window("rest", seconds=seconds, wait=False)
             return engine.window("rest", seconds=seconds)
 
         def window_provider():

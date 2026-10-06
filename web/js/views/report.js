@@ -40,6 +40,15 @@ function composeMarkdown(report, config) {
   lines.push(`- 软件版本：${cell(versions.product)}`);
   lines.push(`- 生成时间：${cell(fmtTime(pick(report, 'created_at') || new Date().toISOString()))}`);
 
+  // 采集调理：只有真实设备会话才有（仿真源不做这一步），与后端 report.to_markdown() 表头同一口径。
+  // 实时链路的波形/指标都是调理后的数据，报告里必须写清口径，否则同一段数据无法复算。
+  const conditioning = pick(report, 'extras.signal_conditioning', null);
+  if (conditioning) {
+    const stages = list(pick(conditioning, 'chain.stages', []))
+      .map((stage) => pick(stage, 'stage')).filter(Boolean).join(' → ');
+    lines.push(`- 采集调理：${cell(pick(conditioning, 'spec'))}（${cell(pick(conditioning, 'dc_removal'))} → ${cell(stages)}，零相位）；上下文 ${cell(fmtInt(pick(conditioning, 'context_samples')))} 点 / 输出 ${cell(fmtInt(pick(conditioning, 'window_samples')))} 点`);
+  }
+
   /* 一、状态评分 */
   lines.push('');
   lines.push('## 一、状态评分');
@@ -214,6 +223,19 @@ export async function render(container, ctx) {
   }
 
   const config = ctx.store.state.config || {};
+
+  // 直接把 uuid 贴进地址栏（#/report?session=…）时也要把会话与 runtime 写回 store：
+  // 顶栏的「会话 / 数据来源」读的是 store.currentSession 与 store.sessionRuntime，
+  // 只在流程/实时/训练/被试视图里被写过，报告页此前从不写，于是从历史台账点进来会显示
+  // 「会话：未选择 / 数据来源：—」，与页面上正在展示的这份报告自相矛盾。
+  // 写法与 training.js 的回填保持一致（runtime 取自详情接口的 runtime.source_kind）。
+  api.getSession(uuid).then((response) => {
+    if (ctx.signal.aborted) return;
+    const data = response.data || {};
+    const session = data.session ? { ...data.session } : { ...data };
+    session.uuid = uuid;
+    ctx.store.setState({ currentSession: session, sessionRuntime: pick(data, 'runtime', null) });
+  }).catch(() => {});
 
   /* --------------------------------------------------------- 报告内容 */
   try {

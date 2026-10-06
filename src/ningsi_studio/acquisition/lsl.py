@@ -209,6 +209,23 @@ class StreamBuffer:
             return np.zeros((self.descriptor.channel_count, 0), dtype=float)
         return np.asarray(rows, dtype=float).T
 
+    def samples_count(self, count: int) -> np.ndarray:
+        """按**样点数**取最近 `count` 个样本，形状 (通道, 采样点)。
+
+        为什么需要它：本设备（BioMulti Lite）的 LSL 时间戳会漂——同一个"4 秒窗"按时间戳切片
+        实测拿到 670~1689 点（2.7~6.8 秒，见 `_analysis/lsl-hardware/window_geometry.json`），
+        窗长忽长忽短会让 Welch 的频率分辨率与质检口径同时失真。声明采样率可靠时
+        （本设备实测 248.5 Hz / 声明 250 Hz），按点数取窗是更稳的口径。
+        """
+        target = int(count)
+        if target <= 0:
+            return np.zeros((self.descriptor.channel_count, 0), dtype=float)
+        with self._lock:
+            rows = list(self._samples)[-target:]
+        if not rows:
+            return np.zeros((self.descriptor.channel_count, 0), dtype=float)
+        return np.asarray(rows, dtype=float).T
+
     def stats(self) -> dict:
         with self._lock:
             stamps = list(self._timestamps)
@@ -290,10 +307,13 @@ class LiveStreamManager:
 
     def __init__(self, buffer_seconds: float = 60.0, *, resolver: Resolver | None = None,
                  inlet_factory: Callable | None = None, poll_interval: float = 2.0,
-                 wanted_kinds: Iterable[str] = ("eeg",)) -> None:
+                 wanted_kinds: Iterable[str] = ("eeg",), wanted_name: str = "") -> None:
         self.buffer_seconds = float(buffer_seconds)
         self.poll_interval = float(poll_interval)
         self.wanted_kinds = tuple(wanted_kinds)
+        # 指定流名称时只连这一条流：现场常常同时存在多条 EEG 流（真机 + 自己的仿真 outlet），
+        # 之前只按 kind 取"第一条 EEG"，会出现"界面写着 lsl:真机名、实际连到另一条流"的静默错配。
+        self.wanted_name = str(wanted_name or "").strip()
         self._resolver = resolver or _default_resolver
         self._inlet_factory = inlet_factory or _default_inlet
         self._buffers: dict[str, StreamBuffer] = {}
@@ -353,6 +373,8 @@ class LiveStreamManager:
             descriptor = describe_stream(info)
             if descriptor is None:
                 continue
+            if self.wanted_name and descriptor.name != self.wanted_name:
+                continue                                   # 明确指定了流名：其余流一律不连
             with self._lock:
                 current = self._workers.get(descriptor.kind)
                 if current is not None and current.is_alive():
@@ -417,6 +439,7 @@ class LiveStreamManager:
         return {
             "running": self.running,
             "wanted_kinds": list(self.wanted_kinds),
+            "wanted_name": self.wanted_name or None,
             "streams": {kind: buffer.stats() for kind, buffer in buffers.items()},
             "descriptors": {kind: buffer.descriptor.as_dict() for kind, buffer in buffers.items()},
             "errors": errors,

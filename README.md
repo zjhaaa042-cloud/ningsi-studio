@@ -118,10 +118,22 @@ $env:PYTHONPATH="src;..\ningsi\src"; python -m ningsi_studio lsl-check --device 
 $env:PYTHONPATH="src;..\ningsi\src"; python -m ningsi_studio serve --port 8765
 ```
 
-真设备只需把它在 LSL 上发布的流名填进新建会话的「设备 / 数据源」：`lsl:<流名>`，
+真设备只需把它在 LSL 上发布的流名填进新建会话的「设备 / 数据源」：`lsl:<流名>`
+（新建会话的输入框带 `GET /api/devices` 的下拉候选，同时保留手填），
 并把时间倍率设为 `1.0`（真实节奏）。采集侧采用常驻缓冲 + 断线重连（见
 `src/ningsi_studio/acquisition/lsl.py`）：设备停掉时窗口会被判为不可用，
 **不会**拿缓冲里的旧数据继续算指标。
+
+真机链路上还有三条与仿真源不同的口径（都有回归测试，见 `tests/test_lsl_acquisition.py`）：
+
+1. **按点数取窗**：窗口长度 = `窗长 × 声明采样率` 个样点。真机时间戳会漂，按时间戳切片
+   实测会把"4 秒窗"切成 2.7~6.8 秒，连带 Welch 分辨率失真；
+2. **逐通道去直流 + 文档 8.2 处理链**（0.5 Hz 去漂移 → 50/60 Hz 陷波 → 45 Hz 低通，零相位）：
+   设备直出值带几百 mV 电极偏置，不去直流就送质检会让每一窗都判 `amplitude/channel_span` 越界；
+   调理口径随会话留痕（`status()["conditioning"]`、报告 `extras.signal_conditioning` 与正文"采集调理"行）；
+3. **按流名精确匹配**：现场可能同时有真机与 `ningsi-sim-eeg` 两条 EEG 流，填了哪条只连哪条，
+   不会"只按类型取第一条"而把界面写着的设备名与实际采集的流错配。
+
 
 端口被占用时自动向后探测 5 个端口；`--port` 可指定起始端口。
 
@@ -248,7 +260,7 @@ assessment / model / artifacts / cancelled / error / finished`。
 
 ```powershell
 .\run.ps1 -Action check       # 静态自检：语法、接口与事件文档、前端资源与接口调用一致性
-.\run.ps1 -Action test        # 91 个用例：单元 + 集成 + 端到端（无需浏览器与真实设备）
+.\run.ps1 -Action test        # 105 个用例：单元 + 集成 + 端到端（无需浏览器与真实设备）
 .\run.ps1 -Action smoke       # 对已启动服务做 HTTP 冒烟：建被试 → 建会话 → 校验报告/热力图/趋势/zip
 ```
 
@@ -257,15 +269,17 @@ SSE 事件与 `Last-Event-ID` 重放（含裸 `NaN/Infinity` 净化）、量表/
 会话列表 `phase_label` 与结束后 `runtime.source_kind` 回归、终态 `phase` 与 `status` 对齐、
 `SignalFeedRegistry` 清扫、趋势台账聚合、集合响应统一信封（`/api/scales`、产物清单）与真分页、
 `--token` 只保护 `/api`（静态资源放行、401 `code=unauthorized`）、
-`/api/overview`、`/api/devices/status`、非运行会话 `/signal` 409、`POST /api/models/train`、端到端产物齐全。
+`/api/overview`、`/api/devices/status`、非运行会话 `/signal` 409、`POST /api/models/train`、端到端产物齐全、
+**LSL 采集层与真机调理**（`tests/test_lsl_acquisition.py`：流类型归一与描述符兜底、按点数取窗、
+流名精确匹配、去直流+四级链后才过质检、贴轨设备判 `flat_channel`、内置仿真 outlet 的文案标注）。
 
 **本机验证记录（Windows 10 + PowerShell 5.1 + Anaconda Python 3.12.4 + NumPy 2.2.6）**
 
 | 检查 | 命令 | 结果 |
 |---|---|---|
 | 语法编译 | `python -m compileall -q src tests` | 通过 |
-| 静态自检 | `python -m ningsi_studio check` | 通过（47 个 py 文件 / 36 条路由 / 23 种文档事件 / 24 种发布事件） |
-| 自动化测试 | `python -m unittest discover -s tests -t .` | **91 个用例全部通过**（实测 165 秒） |
+| 静态自检 | `python -m ningsi_studio check` | 通过（48 个 py 文件 / 36 条路由 / 23 种文档事件 / 24 种发布事件） |
+| 自动化测试 | `python -m unittest discover -s tests -t .` | **105 个用例全部通过**（实测约 170 秒） |
 | 端到端链路 | `python -m ningsi_studio demo --participant p01 --speed 0.05` | `status=done`，产出报告 md/json、热力图、趋势、模型、台账 |
 | HTTP 冒烟 | `scripts\smoke.ps1`（对运行中的服务） | 全部通过，含 `export.zip` 9.8 KB |
 | 前端资源 | 逐个请求 `web/` 下 15 个文件 | 全部 200，MIME 正确（含 `text/javascript`） |

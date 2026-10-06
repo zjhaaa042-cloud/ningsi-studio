@@ -10,13 +10,14 @@
 import { api } from '../api.js';
 import { describeError, toast } from '../store.js';
 import {
-  DASH, button, card, el, empty, field, fmtDate, fmtInt, fmtNum, fmtPercent,
+  DASH, button, card, clear, el, empty, field, fmtDate, fmtInt, fmtNum, fmtPercent,
   fmtRelative, list, phaseText, pick, statusText, table,
 } from '../util.js';
 
 const AGE_BANDS = ['16-17', '18-25', '26-35', '36-45', '46-55', '56-65', '65+'];
 const SEX_OPTIONS = ['女', '男', '不便告知'];
 const HANDEDNESS_OPTIONS = ['右', '左', '双利手'];
+const DEVICE_LIST_ID = 'session-device-options';
 
 /** 视图内状态：切换被试/刷新时保留（视图卸载即丢弃）。 */
 const view = { publicId: null, query: '', editId: null };
@@ -27,6 +28,33 @@ function selectInput(id, options, { placeholder = '请选择', value = '' } = {}
   for (const option of options) node.append(el('option', { value: option, text: option }));
   node.value = value;
   return node;
+}
+
+/** 把 `GET /api/devices` 的探测结果灌进设备输入框的下拉候选（datalist）。 */
+function fillDeviceOptions(datalist, sources) {
+  clear(datalist);
+  for (const item of list(sources)) {
+    const key = pick(item, 'key');
+    // 不支持的流类型只有占位 key（unsupported:xxx），选了也没法用，不列出来
+    if (!key || String(key).startsWith('unsupported:')) continue;
+    const note = pick(item, 'note');
+    datalist.append(el('option', { value: String(key), label: note ? String(note) : String(key) }));
+  }
+}
+
+/**
+ * 设备 / 数据源输入框：`<input list=…>` + 由 `GET /api/devices` 填充的 `<datalist>`。
+ *
+ * 用 datalist 而不是 `<select>`：真实流名称是现场才知道的字符串，select 里没有匹配项时
+ * 赋值会被浏览器静默丢弃（值仍是旧选项），而输入框永远能手填；datalist 只是"探测到的候选"。
+ */
+function deviceField() {
+  const input = el('input', {
+    id: 'session-device', type: 'text', value: 'sim-bsense',
+    attrs: { list: DEVICE_LIST_ID },
+  });
+  const datalist = el('datalist', { id: DEVICE_LIST_ID });
+  return { input, datalist };
 }
 
 function renderSubjectForm(ctx, onCreated) {
@@ -223,7 +251,23 @@ function renderNewSessionPanel(ctx, publicId, options = {}) {
     modeSelect.append(el('option', { value, text }));
   }
   modeSelect.value = 'quick';
-  const deviceInput = el('input', { id: 'session-device', type: 'text', value: 'sim-bsense' });
+  const { input: deviceInput, datalist: deviceOptions } = deviceField();
+  const deviceHint = el('span', { class: 'muted', text: '正在探测可用数据源（GET /api/devices）…' });
+  // 探测失败（例如未装 pylsl）不影响填表：输入框仍可手填 lsl:<流名称>
+  api.devices(1.0).then((response) => {
+    if (ctx.signal.aborted) return;
+    const sources = list(pick(response.data, 'sources', []));
+    fillDeviceOptions(deviceOptions, sources);
+    const real = sources.filter((item) => pick(item, 'real') && !String(pick(item, 'key', '')).startsWith('unsupported:'));
+    const hardwareNote = pick(sources.find((item) => pick(item, 'hardware_note', null)) || {}, 'hardware_note', null);
+    deviceHint.textContent = real.length
+      ? `已探测到 ${real.length} 个实时数据源（下拉可选）：${real.map((item) => pick(item, 'key')).join('、')}；也可手填 lsl:<流名称>`
+      : (hardwareNote || '未探测到实时数据源；仿真源为 sim-bsense，接入设备可手填 lsl:<流名称>');
+  }).catch((error) => {
+    if (ctx.signal.aborted) return;
+    deviceHint.textContent = `数据源探测失败（${describeError(error)}）；仿真源为 sim-bsense，也可手填 lsl:<流名称>`;
+  });
+
   const labelInput = el('input', { id: 'session-label', type: 'text', placeholder: '例如：第一次训练' });
   const submit = button('开始新会话', null, { primary: true });
 
@@ -288,7 +332,14 @@ function renderNewSessionPanel(ctx, publicId, options = {}) {
       who,
       field('时间倍率 time_scale', scaleSelect),
       field('训练模式', modeSelect),
-      field('设备 / 数据源', deviceInput, '仿真源 sim-bsense；接入设备请填 lsl:<流名称>'),
+      // 手写 field 结构而不是用 field()：设备提示要随 GET /api/devices 的结果异步更新，
+      // 而 field() 的 hint 只接受字符串（会在建节点时固化）。
+      el('div', { class: 'field' }, [
+        el('label', { class: 'field__label', for: 'session-device', text: '设备 / 数据源' }),
+        deviceInput,
+        deviceOptions,
+        deviceHint,
+      ]),
       field('会话标签', labelInput),
     ]),
     el('div', { class: 'row row--end', style: 'margin-top:12px' }, [submit]),

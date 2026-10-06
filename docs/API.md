@@ -53,12 +53,15 @@
 { "sources": [ { "key": "sim-bsense", "kind": "sim", "srate": 250.0, "channels": 1,
                  "device": "sim-bsense", "note": "仿真脑电源：数据来源已在界面与报告中标注",
                  "real": false, "hardware_note": "未发现 LSL 流。请先启动采集端…" },
-               { "key": "lsl:ningsi-sim-eeg", "kind": "lsl", "srate": 250.0, "channels": 1,
-                 "device": "ningsi-sim-eeg", "real": true,
-                 "note": "真实 LSL 流：ningsi-sim-eeg（1 通道，250 Hz）",
-                 "stream_type": "EEG", "channel_labels": ["Fp1"], "source_id": "" } ] }
+               { "key": "lsl:ningsi-sim-eeg", "kind": "lsl", "srate": 250.0, "channels": 2,
+                 "device": "ningsi-sim-eeg", "real": true, "simulated": true,
+                 "note": "内置仿真 LSL 流（非真实设备，source_id=ningsi-sim-outlet-v1）：ningsi-sim-eeg（2 通道，250 Hz，标签 ['Fp1', 'Fp2']）；信号已按 acq-condition-v1 调理：…",
+                 "stream_type": "EEG", "channel_labels": ["Fp1", "Fp2"],
+                 "source_id": "ningsi-sim-outlet-v1" } ] }
 ```
 装了 `pylsl` 且扫描到流时会追加 `kind: "lsl"` 的条目；不认识的流类型也会列出并标 `supported: false`。
+`simulated: true` 表示这条 `lsl:` 流是**本仓库内置的仿真 outlet**（`simulate-outlet`）：
+传输是真的，数据是算出来的，note 里会写明"非真实设备"。
 
 ### `GET /api/devices/status`
 正在运行的会话所用设备的**活体健康**：是否在收数、实测采样率、缓冲量、错误。
@@ -146,6 +149,10 @@
 `source` 是**实际数据源**：`device` 传 `lsl:<name>` 但流没起来时运行时会降级为仿真源，此时响应里的
 `source` 会回写成 `sim-bsense`（与 `runtime.source` / `GET .../{uuid}` 的
 `runtime.source_kind` 同源），不会出现"标着 lsl、实际跑 sim"的自相矛盾。
+
+连上真实流时，`srate` 与 `channels` 用**流描述符里的真实值回写**（请求里不传时默认 250.0 / 1）：
+`device="lsl:BioMulti Lite EEG-00cde1"` 的响应会是 `"channels": 2`，与 `runtime.source.channels`
+以及报告 `extras.channels` 同源；流名按 `lsl:` 后的字符串**精确匹配**，同名多条流时只连这一条。
 并发超限返回 `429`。
 
 ### `GET /api/sessions?participant=p01&status=done&page=1&limit=50`
@@ -212,7 +219,10 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 **高频原始信号 SSE**（`text/event-stream`）：给"实时监测"页的波形与频谱供数，
 与 4 秒分析窗**解耦**——按 `hz`（默认 10 帧/秒，上限 25）直接读采集缓冲的最新样本。
 
-- `seconds`：每帧覆盖的时间跨度（2–30 秒，默认 10）
+- `seconds`：每帧覆盖的时间跨度（2–30 秒，默认 10）；**真实 LSL 源会被压到 6 秒以内**
+  （等于 `ManagedLslSource.condition_seconds`）：真机调理链是纯 Python 双二阶，成本与窗长线性相关
+  （2 通道 10 秒窗约 30 ms/帧），10 FPS 的显示通道按长窗调理会把推帧线程吃满。
+  这是"显示窗口"的上限，帧里回报的 `window_sec` 会同步变小（前端按它定标），**不改变** 4 秒分析窗口径。
 - `points`：每通道最多返回多少个点（200–4000，默认 1200）；抽稀用 **min/max 保峰值**，
   尖峰/伪迹不会被均匀抽样抹掉
 - 会话不在运行中时返回 `409`，走**统一错误体**（`{"error":{"code":"conflict","message":...}}`，
@@ -311,6 +321,10 @@ lapse_rate, false_starts, valid`。
 - `GET /api/sessions/{uuid}/assessment` → 联合评估对象：
   `spec, conclusion, dimension_states{attention,stress}, consistency{eeg_vs_scale,eeg_vs_behavior},
   evidence[{code,source,dimension,summary,value,direction,available,ref}], advice[], boundary`。
+  `consistency` 的取值：`一致`（两侧都有可用证据且同向提示偏离）、`不一致`、
+  `无冲突`（两侧都有证据但无冲突），以及三种缺证据写法——`无法比较（脑电不可用）`、
+  `无法比较（量表不可用）`、`无法比较（量表与脑电均无可用证据）`（行为任务同理）。
+  **任一侧缺证据时不再报"一致"**（脑电 0 可用窗却写"脑电与量表一致"属于凭空断言一致性）。
   评估未完成时 `409`。
 - `GET /api/sessions/{uuid}/training` → `{ "segments": [...], "summary": {...} }`（`segments[]` 的字段见
   上方 `segment` 事件）；`summary` 含 `mean_focus, on_target_ratio, first_to_last_change, baseline_before,
@@ -320,6 +334,9 @@ lapse_rate, false_starts, valid`。
 - `GET /api/sessions/{uuid}/report` → 报告 JSON（`spec/participant/indicators/quality/scales/
   behavior/assessment/extras`），并附 `report_markdown`（报告原文，Markdown 文本）与
   `report_markdown_path`；尚未生成时返回 `202` 且带 `partial: true` 与阶段进度。
+  `extras.signal_conditioning` **只在真实 LSL 会话里出现**（仿真源不做调理），形状为
+  `{spec, dc_removal, chain{spec,stages[]}, srate, observed_srate, context_samples, window_samples,
+  expected_samples}`；它同时会渲染成报告正文表头的「采集调理」一行，便于复算与审计。
 - `GET /api/sessions/{uuid}/artifacts?page=1&limit=50`
   → `{ "items": [{ kind, path, bytes, sha256, exists, download }], "total": 7, "limit": 50, "page": 1 }`
   同一信封与分页参数；单会话产物通常不足 10 条（`report_md/report_json/heatmap_svg/trend_svg/

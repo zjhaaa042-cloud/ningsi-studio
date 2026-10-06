@@ -641,6 +641,15 @@ class SessionRuntime:
         result = assessment_domain.assess(eeg, scale_objects, behavior)
         return result
 
+    def _conditioning_record(self):
+        """真机信号的调理口径；仿真源没有这一步，返回 None。"""
+        engine = getattr(self.source, "engine", None) if self.source is not None else None
+        getter = getattr(engine, "conditioning", None)
+        if not callable(getter):
+            return None
+        record = getter()
+        return record or None
+
     def _write_report(self, baseline, scale_objects, sart_result, pvt_result, monitor,
                       training_result, assessment_result):
         stem = f"sub-{self.subject['public_id']}_ses-01_run-001"
@@ -667,6 +676,9 @@ class SessionRuntime:
                 "source_note": self.source.note,
                 "srate": self.source.srate,
                 "channels": self.source.channels,
+                # 真机调理口径（逐通道去直流 + 文档 8.2 四级链）留在报告里，便于复算与审计；
+                # 仿真源没有这一步，取到 None 就不写。
+                "signal_conditioning": self._conditioning_record(),
                 "time_scale": self.scale,
                 "alerts": self.engine.fired_alerts,
                 "baseline_protocol": dict(config.BASELINE_PROTOCOL),
