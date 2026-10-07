@@ -50,18 +50,48 @@
 
 ### `GET /api/devices?probe=1.0`
 ```json
-{ "sources": [ { "key": "sim-bsense", "kind": "sim", "srate": 250.0, "channels": 1,
-                 "device": "sim-bsense", "note": "仿真脑电源：数据来源已在界面与报告中标注",
-                 "real": false, "hardware_note": "未发现 LSL 流。请先启动采集端…" },
-               { "key": "lsl:ningsi-sim-eeg", "kind": "lsl", "srate": 250.0, "channels": 2,
-                 "device": "ningsi-sim-eeg", "real": true, "simulated": true,
-                 "note": "内置仿真 LSL 流（非真实设备，source_id=ningsi-sim-outlet-v1）：ningsi-sim-eeg（2 通道，250 Hz，标签 ['Fp1', 'Fp2']）；信号已按 acq-condition-v1 调理：…",
-                 "stream_type": "EEG", "channel_labels": ["Fp1", "Fp2"],
-                 "source_id": "ningsi-sim-outlet-v1" } ] }
+{ "sources": [ { "key": "lsl:BioMultiLite EEG-00cde1", "kind": "lsl", "srate": 250.0,
+                 "channels": 2, "device": "BioMultiLite EEG-00cde1", "real": true,
+                 "simulated": false, "note": "真实 LSL 流：…（信号已按 acq-condition-v1 调理）",
+                 "channel_labels": ["Fp1", "Fp2"], "source_id": "BioMulti_Lite_EEG-00cde1" },
+               { "key": "sim-bsense", "kind": "sim", "srate": 250.0, "channels": 1,
+                 "device": "sim-bsense", "real": false, "explicit_only": true,
+                 "note": "仿真脑电源（仅用于演示与自动测试，必须在界面与报告中标注）" } ],
+  "source": "lsl:BioMultiLite EEG-00cde1", "source_kind": "lsl", "source_note": "…",
+  "has_real_source": true }
 ```
-装了 `pylsl` 且扫描到流时会追加 `kind: "lsl"` 的条目；不认识的流类型也会列出并标 `supported: false`。
-`simulated: true` 表示这条 `lsl:` 流是**本仓库内置的仿真 outlet**（`simulate-outlet`）：
-传输是真的，数据是算出来的，note 里会写明"非真实设备"。
+
+**顺序与缺省规则（2026-10-07 起）**：
+
+- **真实 LSL 流排在前面**；仿真源 `sim-bsense` 永远排最后并带 `explicit_only: true`，
+  只能被**显式**选择，不再作为缺省（原来它排第一，前端就把仿真当默认了）。
+- `has_real_source` 直接回答"现在到底有没有脑机信号"；没有实时源时列表里只有仿真源，
+  且它带 `hardware_note`（接入指引）。
+- `simulated: true` 表示这条 `lsl:` 流是**本仓库内置的仿真 outlet**（`simulate-outlet`）：
+  传输是真的、数据是算出来的，note 会写明"非真实设备"。
+
+### `GET /api/devices/preview` · `POST /api/devices/preview` · `DELETE /api/devices/preview`
+**无会话的设备实时预览**：不创建会话也能看当前脑电信号（读取检测到的实时流，
+做与报告一致的 `acq-condition-v1` 真机调理，并给出这一窗的质检判定）。
+
+```json
+GET  /api/devices/preview            → { "active": false, "source": null, "no_signal": true,
+                                         "note": "未开始预览：当前没有脑机信号" }
+POST /api/devices/preview            → body { "source": "lsl:<流名>" 或 "sim-bsense"（可省略） }
+     { "active": true, "source": "lsl:…", "kind": "lsl", "device": "…", "srate": 250.0,
+       "channels": 2, "channel_labels": ["Fp1","Fp2"], "live": true,
+       "seconds_since_last": 0.02, "buffered_samples": 4820,
+       "conditioning": { "spec": "acq-condition-v1", … }, "no_signal": false }
+GET  /api/devices/preview?window=1   → 上面字段 + { "seconds": 4.0, "samples": [[…], […]],
+                                         "peak_uv": 42.1, "std_uv": 8.3,
+                                         "quality": { "ok": true, "reasons": [], "metrics": {…} } }
+DELETE /api/devices/preview          → { "active": false, "stopped": true }
+```
+
+- `source` 省略时用**当前检测到的实时源**；一个都没有 ⇒ `409 conflict`
+  （「未检测到脑电信号…」），**不会**回落到仿真源。
+- 预览**只读**：不建会话、不落库、不出指标；`quality` 用的是与报告同一份 `config.QUALITY` 门槛。
+- `live=false` / `no_signal=true` 表示流还在但最近没有样本（设备停了/线掉了），界面据此显示"无信号"。
 
 ### `GET /api/devices/status`
 正在运行的会话所用设备的**活体健康**：是否在收数、实测采样率、缓冲量、错误。
@@ -84,11 +114,14 @@
 
 ### `GET /api/overview`
 首页统计 + 最近会话 `latest_detail` + 最近被试 `subjects_recent` + `active_sessions` +
-`source` / `source_kind` / `source_note`（**默认数据源**的键、类别与说明文案，供顶栏展示：
-未选择会话时顶栏也要能写出「数据来源：仿真」，而不是一个 `—`）。
+`source` / `source_kind` / `source_note`（**当前检测到的实时源**的键、类别与说明文案，供顶栏展示）
++ `has_real_source`。
 
-> `GET /api/health` 里的 `overview` 同样带 `source` / `source_kind` / `source_note`
-> （取自默认源，不扫 LSL，保证 health 快），键名一致，前端 boot 时只读这一处即可。
+**检测不到实时源时 `source`/`source_kind`/`source_note` 都是 `null`**，`has_real_source` 为 `false`
+——顶栏据此如实写成「数据来源：无信号」。仿真源 `sim-bsense` **不参与**这个回退：它必须由调用方
+显式指定（见 `POST /api/sessions` 的取值规则），没有脑机信号时不会自动使用仿真。
+
+> `GET /api/health` 里的 `overview` 也带同样四个字段（LSL 扫描结果有 3 秒缓存，health 不会被拖慢）。
 
 ### `GET /api/sessions` 与列表类响应的分页约定
 `{"items": [...], "total": N, "limit": L, "page": P}`；`page` 从 1 开始，`limit` 上限 200。
@@ -129,30 +162,47 @@
 ### `POST /api/sessions`
 请求：
 ```json
-{ "participant": "p01", "device": "sim-bsense", "time_scale": 0.05,
+{ "participant": "p01", "device": "lsl:BioMultiLite EEG-00cde1", "time_scale": 0.05,
   "training_mode": "quick", "srate": 250.0, "channels": 1, "label": "第一次训练",
   "create_subject": true }
 ```
 `time_scale` 取值 `[0.01, 1.0]`；**`time_scale < 0.2` 视为快速演示模式**，量表、SART、PVT 由服务端
 生成确定性作答（无需前端交互），用于评审演示与自动化测试。
 
+**`device` 取值规则（2026-10-07 起收紧：不再有"缺省仿真"）**：
+
+| `device` | 行为 |
+|---|---|
+| 省略 / `""` / `auto` | 用**当前检测到的实时源**（真机优先，其次内置仿真 outlet）；**一个都没有 ⇒ `409`**，消息里给接入指引 |
+| `lsl:<流名称>` | 先确认该流现在可见，否则 `409`（fail fast，不再"建好会话才发现没信号"）；连接后 `srate`/`channels` 按流描述符回写 |
+| `sim-bsense` | **允许，但必须显式**：这是演示/自测入口，`source`/SSE 事件/报告都会标注为仿真 |
+| 其它任意字符串 | `422 validation_failed`（不再被当成仿真源） |
+
+不再有"真实设备打不开就降级为仿真源"的静默替换：真实源不可用时会话启动失败并写明
+`无信号：数据源 <device> 不可用（…）`。
+
 响应 `201`：
 ```json
 { "session": { "uuid": "<32位>", "participant": "p01", "subject_id": 1, "label": "第一次训练",
                 "status": "running", "phase": "qc",
-                "phase_label": "设备质检", "progress": 0.0, "device": "sim-bsense",
+                "phase_label": "设备质检", "progress": 0.0,
+                "device": "lsl:BioMultiLite EEG-00cde1",
                 "time_scale": 0.05, "training_mode": "quick",
                 "engine_versions": { "spectrum": "welch-v1", "indicator": "indicator-v1",
                                      "baseline": "baseline-v1", "assessment": "joint-assessment-v1" },
-                "source": "sim-bsense", "srate": 250.0, "channels": 1,
+                "source": "lsl:BioMultiLite EEG-00cde1", "srate": 250.0, "channels": 2,
                 "started_at": "...", "ended_at": null, "created_at": "...", "error": null },
   "events_url": "/api/sessions/<uuid>/events",
   "phases": [ { "key": "qc", "label": "设备质检", "interactive": false, "weight": 0.04 } ],
-  "runtime": { "alive": true, "source": "sim-bsense" } }
+  "runtime": { "alive": true, "source": "lsl:BioMultiLite EEG-00cde1" } }
 ```
-`source` 是**实际数据源**：`device` 传 `lsl:<name>` 但流没起来时运行时会降级为仿真源，此时响应里的
-`source` 会回写成 `sim-bsense`（与 `runtime.source` / `GET .../{uuid}` 的
-`runtime.source_kind` 同源），不会出现"标着 lsl、实际跑 sim"的自相矛盾。
+`source` 是**实际数据源**（`lsl:<name>` 或显式的 `sim-bsense`），与 `runtime.source` /
+`GET .../{uuid}` 的 `runtime.source_kind` 同源，不会出现"标着 lsl、实际跑 sim"的自相矛盾。
+
+连上真实流时，`srate` 与 `channels` 用**流描述符里的真实值回写**（请求里不传时默认 250.0 / 1）：
+`device="lsl:BioMulti Lite EEG-00cde1"` 的响应会是 `"channels": 2`，与 `runtime.source.channels`
+以及报告 `extras.channels` 同源；流名按 `lsl:` 后的字符串**精确匹配**，同名多条流时只连这一条。
+并发超限返回 `429`。
 
 连上真实流时，`srate` 与 `channels` 用**流描述符里的真实值回写**（请求里不传时默认 250.0 / 1）：
 `device="lsl:BioMulti Lite EEG-00cde1"` 的响应会是 `"channels": 2`，与 `runtime.source.channels`

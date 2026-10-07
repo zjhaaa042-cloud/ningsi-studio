@@ -202,12 +202,10 @@ def build_router(settings: Settings) -> Router:
     def health(request: Request) -> Response:
         with store.read_only(db_path) as conn:
             overview = repo.overview(conn)
-        # 默认数据源一并给出：首页（尚未选择会话）时顶栏的"数据来源/设备"靠它渲染，
-        # 否则只能显示 `—`，看起来像坏了；这里不扫 LSL（health 要快），用默认源。
-        default_source = live_source.default_source_info()
-        overview["source"] = default_source["key"]
-        overview["source_kind"] = default_source["kind"]
-        overview["source_note"] = default_source["note"]
+        # 数据来源三件套 = **当前检测到的实时源**；检测不到就是 None（顶栏写"数据来源：无信号"）。
+        # 绝不能回落成"新会话将使用仿真源"——没有脑机信号就不使用仿真，这是产品规则。
+        # LSL 扫描结果有 3 秒缓存（见 live_source.cached_sources），health 不会被拖慢。
+        overview.update(live_source.detected_source_fields())
         return Response.json({
             "status": "ok",
             "service": "ningsi-studio",
@@ -254,7 +252,43 @@ def build_router(settings: Settings) -> Router:
     def devices(request: Request) -> Response:
         probe = request.query_float("probe", 1.0)
         probe = max(0.2, min(5.0, probe))
-        return Response.json({"sources": live_source.list_available(probe_seconds=probe)})
+        sources = live_source.list_available(probe_seconds=probe)
+        # has_real 让界面能一眼判断"现在到底有没有脑机信号"，不用自己筛 real 字段
+        return Response.json({
+            "sources": sources,
+            **live_source.detected_source_fields(sources),
+            "has_real_source": any(row.get("real") and not row.get("simulated") for row in sources),
+        })
+
+    # ------------------------------------------------- 无会话的设备实时预览
+    @router.get(r"/api/devices/preview")
+    def preview_status(request: Request) -> Response:
+        """预览状态；`?window=1` 时顺带返回一窗真实波形（前端按 1~2 秒轮询）。"""
+        preview = live_source.preview_stream()
+        if request.query_int("window", 0, low=0, high=1) == 1:
+            return Response.json(preview.window())
+        return Response.json(preview.status())
+
+    @router.post(r"/api/devices/preview")
+    def preview_start(request: Request) -> Response:
+        """启动预览：不传 source 时自动用当前检测到的实时源；没有信号就 409（不回落仿真）。"""
+        payload = schemas.typed(request.json())
+        device = schemas.optional_text(payload.get("source") or payload.get("device"),
+                                      max_len=120, name="数据源")
+        device = (device or "").strip() or None
+        if device and device != live_source.SIM_SOURCE and not device.startswith("lsl:"):
+            raise ValidationError(
+                f"数据源只能是 lsl:<流名称> 或 {live_source.SIM_SOURCE}，收到 {device!r}", detail=device)
+        try:
+            status = live_source.preview_stream().start(device)
+        except RuntimeError as exc:
+            raise Conflict(str(exc)) from exc
+        return Response.json(status)
+
+    @router.delete(r"/api/devices/preview")
+    def preview_stop(request: Request) -> Response:
+        live_source.preview_stream().stop()
+        return Response.json({"active": False, "stopped": True})
 
     @router.get(r"/api/devices/status")
     def device_status(request: Request) -> Response:
@@ -397,7 +431,32 @@ def build_router(settings: Settings) -> Router:
         # 先做并发上限预检：避免 429 之后在库里留下"没有运行线程的幽灵会话"
         manager.ensure_capacity()
         public_id = schemas.normalize_public_id(payload["participant"])
-        device = schemas.optional_text(payload.get("device"), max_len=120, name="设备") or "sim-bsense"
+        # 数据源解析（2026-10-07 起收紧）：**不再有"缺省仿真"**。
+        #   · 不传 device / 传 auto ⇒ 用当前检测到的实时源；一个都没有就 409，让用户去接设备；
+        #   · 传 lsl:<流名> ⇒ 先确认这条流现在真的可见，避免"建好会话才发现没信号"；
+        #   · 传 sim-bsense ⇒ 允许，但这是**显式**选择（演示/自测），界面与报告都会标注仿真。
+        device_raw = schemas.optional_text(payload.get("device"), max_len=120, name="设备")
+        device = (device_raw or "").strip()
+        if not device or device.lower() in ("auto", "default", "any"):
+            sources = live_source.list_available(1.0)
+            device = live_source.default_device(sources) or ""
+            if not device:
+                raise Conflict(
+                    "未检测到脑电信号（LSL）：请先启动采集端（如 BioMultiLite / BSense-R）"
+                    "并确认在推流；仅做演示或自测时，请在“设备 / 数据源”里显式选择仿真源 sim-bsense")
+        elif device.startswith("lsl:"):
+            stream_name = device.split(":", 1)[1]
+            keys = {row.get("key") for row in live_source.list_available(1.0)}
+            if device not in keys:
+                visible = sorted(key for key in keys if str(key).startswith("lsl:"))
+                raise Conflict(
+                    f"未发现 LSL 流 {stream_name}（当前可见：{visible or '无'}）；"
+                    f"请确认采集端正在推流（GET /api/devices 可列出可见流）")
+        elif device != live_source.SIM_SOURCE:
+            raise ValidationError(
+                f"设备 / 数据源只能是 lsl:<流名称>（实时设备）或 {live_source.SIM_SOURCE}"
+                f"（显式选择仿真，仅演示/自测用），收到 {device!r}",
+                detail=device)
         time_scale = schemas.clamp_float(payload.get("time_scale", payload.get("speed")), 1.0,
                                          low=0.01, high=1.0, name="时间倍率")
         srate = schemas.clamp_float(payload.get("srate"), 250.0, low=1.0, high=2000.0, name="采样率")
@@ -427,7 +486,12 @@ def build_router(settings: Settings) -> Router:
             )
         # 注意：这里必须已经退出 `with store.connect(...)`（事务提交、连接释放），
         # 再启动运行线程；否则运行线程装载会话时会撞上 "database is locked"。
-        runtime = manager.start_with_rollback(row["uuid"], lambda reason: rollback_session(row["uuid"], reason))
+        try:
+            runtime = manager.start_with_rollback(row["uuid"], lambda reason: rollback_session(row["uuid"], reason))
+        except Exception as exc:  # noqa: BLE001
+            # 数据源打不开（例如"流可见但 8 秒内没有样本"）→ 409 + 明确原因，而不是 500。
+            # 会话已在 rollback 回调里被标记为 failed，这里只负责把 HTTP 语义说清楚。
+            raise Conflict(f"会话未能启动：{exc}") from exc
         # 运行期会按"真实可用性"选数据源：`lsl:` 流没数据时运行时会退回仿真源，而建会话时
         # 只按设备名推断 source。若不回写，同一响应里就会出现 source="lsl" 而
         # runtime.source_kind="sim" 的自相矛盾，等于把"当前是仿真"这件事藏了起来
@@ -1027,12 +1091,11 @@ def build_router(settings: Settings) -> Router:
             rows, total = repo.list_subjects(conn, limit=5, offset=0)
             payload["subjects_recent"] = [_subject_public(row) for row in rows]
             payload["subjects"] = max(payload["subjects"], total)
-        sources = live_source.list_available(0.2)
-        payload["source_note"] = sources[0].get("note") if sources else None
-        # 同样补上"默认数据源"的键与类别：前端 sourceText() 需要 kind 才敢写「数据来源：仿真」，
-        # 只给 note 会退化成显示设备串（O1 那条缺陷就是这么来的）。
-        payload["source"] = sources[0].get("key") if sources else None
-        payload["source_kind"] = sources[0].get("kind") if sources else None
+        sources = live_source.list_available(0.4)
+        # 只报"检测到的实时源"（真机优先，其次内置仿真 outlet）；没有就是 None → 顶栏"无信号"。
+        # 仿真脑电源 sim-bsense **不参与**这个回退（它必须被显式选择）。
+        payload.update(live_source.detected_source_fields(sources))
+        payload["has_sim_source"] = True          # 仿真始终可用，但只能显式选择
         payload["active_sessions"] = manager.active_uuids()
         return Response.json(payload)
 
@@ -1155,8 +1218,11 @@ def _build_zip_response(uuid: str, db_path: Path, settings: Settings, manager) -
 _PATH_SPECS = [
     ("get", "/api/health", "服务健康与运行概况", None),
     ("get", "/api/config", "引擎口径与阈值全量定义", None),
-    ("get", "/api/devices", "可用数据源（仿真 / LSL 实时流）", "probe"),
+    ("get", "/api/devices", "可用数据源（实时 LSL 流在前，仿真源可显式选择）", "probe"),
     ("get", "/api/devices/status", "运行中会话的设备健康状况（是否在收数、实测采样率）", None),
+    ("get", "/api/devices/preview", "无会话的设备实时预览状态与一窗波形（?window=1）", "window"),
+    ("post", "/api/devices/preview", "启动设备实时预览（不传 source 时自动选检测到的实时源）", None),
+    ("delete", "/api/devices/preview", "停止设备实时预览", None),
     ("get", "/api/overview", "首页总览统计", None),
     ("get", "/api/subjects", "被试列表（分页 / 搜索）", "query,page,limit"),
     ("post", "/api/subjects", "新建被试（匿名编号 + 同意记录）", None),

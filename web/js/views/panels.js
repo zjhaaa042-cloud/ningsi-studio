@@ -14,6 +14,7 @@
 
 import { api } from '../api.js';
 import { describeError } from '../store.js';
+import { renderPreviewCard } from '../preview.js';
 import {
   DASH, button, card, el, empty, field, fmtInt, fmtNum, fmtPercent, fmtSeconds,
   list, pageFrame, pick, table,
@@ -280,6 +281,11 @@ export const devices = {
     const statusHost = el('p', { class: 'muted', text: '正在读取 GET /api/devices/status …' });
     const bodyHost = el('div');
     host.append(statusHost, bodyHost);
+    // 实时预览放在最前：现场第一步就是"现在到底有没有信号、波形正不正常"，
+    // 不需要先建会话（2026-10-07 需求）。
+    const previewHost = el('div');
+    host.append(previewHost);
+    renderPreviewCard(ctx, previewHost);
 
     async function loadDeviceStatus(showErrors = true) {
       try {

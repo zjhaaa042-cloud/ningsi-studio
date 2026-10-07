@@ -12,6 +12,7 @@
 import { api } from '../api.js';
 import { describeError, toast } from '../store.js';
 import { connectSessionEvents, connectSignalStream } from '../sse.js';
+import { renderPreviewCard } from '../preview.js';
 import {
   DASH, button, card, el, empty, fmtInt, fmtNum, fmtPercent, fmtSeconds, fmtTime,
   list, pageFrame, phaseText, pick, statusText, table,
@@ -77,13 +78,17 @@ export function render(container, ctx) {
   const host = pageFrame(container, '实时监测', actions);
 
   if (!uuid) {
+    // 没选会话也能看真实信号（2026-10-07 需求）：先给"设备实时预览"，再给去创建会话的入口。
     host.append(card('尚未选择会话', el('div', {}, [
-      empty('请先从历史会话或被试管理中选择一个会话。'),
+      empty('如果要看整段会话的指标与热力图，请先从历史会话或被试管理中选择一个会话；'
+        + '只想确认现在有没有脑电信号，用下面的实时预览即可（不建会话、不写入数据库）。'),
       el('div', { class: 'row', style: 'margin-top:12px' }, [
         button('前往历史会话', () => ctx.navigate('#/history'), { primary: true }),
         button('前往被试管理', () => ctx.navigate('#/subjects')),
+        button('前往设备状态', () => ctx.navigate('#/devices')),
       ]),
     ])));
+    renderPreviewCard(ctx, host);
     return;
   }
 

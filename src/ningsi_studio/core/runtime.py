@@ -203,24 +203,27 @@ class SessionRuntime:
             if self.session is None:
                 raise RuntimeError(f"会话不存在：{self.uuid}")
             self.subject = repo.get_subject_by_pk(conn, self.session["subject_id"])
-        device = self.session["device"] or "sim-bsense"
+        device = str(self.session["device"] or "").strip()
+        if not device:
+            # 历史记录里可能是"缺省仿真"时代建的会话：不再默默补成仿真源（产品规则：
+            # 没有脑机信号就不使用仿真，直接如实报"无信号"）。
+            raise RuntimeError("会话没有指定数据源：请新建会话并选择设备 / 数据源"
+                               "（实时设备填 lsl:<流名称>；仅演示时显式选仿真源 sim-bsense）")
         try:
             self.source = build_source(
                 device,
                 channels=int(self.session["channels"] or 1),
                 srate=float(self.session["srate"] or 250.0),
                 seed=int(abs(hash(self.uuid)) % 10000),
+                # 真实流正常在推时样本是毫秒级到达的；8 秒足够，且能让
+                # "流在但没数据"的情况在 HTTP 请求里尽快失败（不拖到 15 秒）。
+                ready_timeout=8.0,
             )
-        except Exception as exc:  # noqa: BLE001 - 真实设备不可用时降级而不是让会话失败
-            self.source = build_source("sim-bsense",
-                                       channels=int(self.session["channels"] or 1),
-                                       srate=float(self.session["srate"] or 250.0),
-                                       seed=int(abs(hash(self.uuid)) % 10000))
-            self.source.note = (f"真实设备 {device} 不可用（{exc}），已降级为仿真源；"
-                                f"数据来源已在界面与报告中标注")
+        except Exception as exc:  # noqa: BLE001 - 不再降级为仿真：没有真实信号就如实失败
+            self.source = None
             self.device_error = str(exc)
-        else:
-            self.device_error = None
+            raise RuntimeError(f"无信号：数据源 {device} 不可用（{exc}）") from exc
+        self.device_error = None
 
     @property
     def scale(self) -> float:

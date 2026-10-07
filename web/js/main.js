@@ -164,18 +164,23 @@ function updateHeader() {
   const runtime = state.sessionRuntime || {};
   const session = state.currentSession || {};
 
-  // 数据来源：会话运行时的 source_kind 优先（更贴近当前会话），否则用 /api/health 的概览
-  // （health.overview.source_kind 由后端显式给出，未选择会话时也能正确写成"数据来源：仿真"）
+  // 数据来源：会话运行时的 source_kind 优先（更贴近当前会话），否则用 /api/health 的概览。
+  // 检测不到实时源时概览里的 source/source_kind 都是 null —— 此时必须显示「无信号」，
+  // **不能**回落成"仿真"（产品规则：没有脑机信号就不使用仿真，仿真只能被显式选择）。
   const kind = runtime.source_kind || pick(health, 'overview.source_kind', null) || null;
   const note = runtime.source_note || pick(health, 'overview.source_note', null);
   const deviceKey = pick(session, 'device', null) || pick(health, 'overview.source', null);
   // 历史已结束会话的 runtime.source_kind 可能是空的：按设备键兜底判定类别，
   // 徽标文案与"仿真高亮"用同一个 effectiveKind，避免一个说仿真、一个不高亮
   const effectiveKind = kind || kindFromKey(deviceKey);
-  const label = sourceText(kind, note, deviceKey);
+  const noSignal = !effectiveKind && !deviceKey && !session.uuid;
+  const label = noSignal ? '数据来源：无信号' : sourceText(kind, note, deviceKey);
   sourceBadge.textContent = label;
-  sourceBadge.title = note || '数据来源标注（仿真数据会在界面与报告中显式标注）';
-  sourceBadge.classList.toggle('badge--strong', String(effectiveKind || '').toLowerCase() === 'sim');
+  sourceBadge.title = noSignal
+    ? '未检测到 LSL 脑电信号。请到「设备状态」页启动采集端后重试；仅演示时可在建会话时显式选择仿真源 sim-bsense'
+    : (note || '数据来源标注（仿真数据会在界面与报告中显式标注）');
+  sourceBadge.classList.toggle('badge--strong', noSignal
+    || String(effectiveKind || '').toLowerCase() === 'sim');
 
   const specs = pick(health, 'engine', null) || pick(config, 'specs', {}) || {};
   engineBadge.textContent = `口径：${Object.entries(specs).map(([key, value]) => `${key}=${value}`).join(' / ') || '—'}`;
@@ -196,9 +201,12 @@ function updateHeader() {
         ? `｜错误：${JSON.stringify(deviceInfo.stream_errors)}` : '');
     deviceBadge.classList.toggle('badge--strong', !live);
   } else {
-    deviceBadge.textContent = `设备：${deviceKey || '—'}`;
-    deviceBadge.title = `采样率 ${pick(session, 'srate', '—')} Hz｜通道 ${pick(session, 'channels', '—')}`;
-    deviceBadge.classList.toggle('badge--strong', false);
+    // 没有设备键就是"没检测到信号"：写清楚，不要只给一个 "—"（看起来像坏了）
+    deviceBadge.textContent = `设备：${deviceKey || '未检测到信号'}`;
+    deviceBadge.title = deviceKey
+      ? `采样率 ${pick(session, 'srate', '—')} Hz｜通道 ${pick(session, 'channels', '—')}`
+      : '未检测到 LSL 脑电设备；到「设备状态」页可查看接入指引与实时预览';
+    deviceBadge.classList.toggle('badge--strong', noSignal);
   }
 
   if (!session.uuid) {

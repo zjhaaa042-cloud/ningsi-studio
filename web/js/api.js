@@ -136,6 +136,7 @@ async function request(method, path, { body, params, timeout = DEFAULT_TIMEOUT, 
 
 const get = (path, params, options) => request('GET', path, { ...options, params });
 const post = (path, body, options) => request('POST', path, { ...options, body: body === undefined ? {} : body });
+const del = (path, options) => request('DELETE', path, { ...options });
 
 /* ------------------------------------------------------------------ 基础 */
 export const api = {
@@ -143,6 +144,11 @@ export const api = {
   config: () => get('/api/config'),
   devices: (probe) => get('/api/devices', { probe }),
   deviceStatus: () => get('/api/devices/status'),
+  // 无会话的设备实时预览：状态 / 一窗波形 / 启动 / 停止
+  devicePreview: () => get('/api/devices/preview'),
+  devicePreviewWindow: () => get('/api/devices/preview', { window: 1 }),
+  startDevicePreview: (source) => post('/api/devices/preview', { source: source || null }),
+  stopDevicePreview: () => del('/api/devices/preview'),
   overview: () => get('/api/overview'),
   openapi: () => get('/api/openapi.json'),
 

@@ -146,18 +146,27 @@ class DevicesTests(StudioTestCase):
         payload = self.json_body(self.get("/api/devices?probe=0.2"), 200, "设备列表应返回 200")
         sources = payload["sources"]
         self.assertIsInstance(sources, list, "sources 应为数组")
-        self.assertTrue(sources, "至少应给出一个仿真数据源")
+        self.assertTrue(sources, "至少应给出一个数据源")
+        self.assertIn("has_real_source", payload, "应直接给出「当前有没有真实源」的判断")
 
-        sim = sources[0]
-        self.assertEqual(sim["key"], "sim-bsense", "仿真源 key 应为 sim-bsense")
+        # 2026-10-07 产品规则变更：**真实流在前、仿真源放最后并标记 explicit_only**。
+        # 原来断言"首个数据源是仿真源"，那会让前端把仿真当缺省选择；现在缺省必须跟着真机走，
+        # 没有真机时靠 has_real_source=False + 显式选择仿真来区分。
+        sim = next((item for item in sources if item["key"] == "sim-bsense"), None)
+        self.assertIsNotNone(sim, "列表中应仍然包含仿真源（用于显式选择的演示）")
         self.assertEqual(sim["kind"], "sim", "仿真源 kind 应为 sim")
         self.assertEqual(sim["device"], "sim-bsense", "仿真源 device 应为 sim-bsense")
         self.assertEqual(sim["srate"], 250.0, "仿真源采样率应为 250 Hz")
         self.assertEqual(sim["channels"], 1, "仿真源通道数应为 1")
         self.assertFalse(sim["real"], "仿真源不应标记为真实设备")
         self.assertIn("note", sim, "数据源应带来源说明")
-        if len(sources) == 1:
-            self.assertIn("hardware_note", sim, "无真实 LSL 流时应给出硬件提示")
+        self.assertTrue(sim.get("explicit_only"), "仿真源应标记 explicit_only（只能被显式选择）")
+        real_rows = [item for item in sources if item.get("real") and not item.get("simulated")]
+        if real_rows:
+            self.assertNotEqual(sources[0]["key"], "sim-bsense", "有真实流时仿真源不应排在首位")
+        else:
+            self.assertFalse(payload["has_real_source"], "没有真实流时 has_real_source 应为 False")
+            self.assertIn("hardware_note", sim, "无实时信号时应给出接入提示")
 
     def test_devices_probe_must_be_number(self) -> None:
         response = self.get("/api/devices?probe=abc")
@@ -193,7 +202,17 @@ class OverviewTests(StudioTestCase):
         self.assertTrue(recent, "应至少给出一个最近被试")
         for key in ("public_id", "label", "consent_version"):
             self.assertIn(key, recent[0], f"最近被试应含 {key}")
-        self.assertTrue(payload["source_note"], "总览应给出当前数据源的说明文案")
+        # 数据来源三件套：检测到实时源时给出 key/kind/note；**没有信号时必须都是 None**
+        # （2026-10-07 产品规则：没有脑机信号就不使用仿真，界面显示"无信号"）。
+        for key in ("source", "source_kind", "source_note", "has_real_source"):
+            self.assertIn(key, payload, f"总览应含 {key}")
+        if payload["has_real_source"]:
+            self.assertTrue(payload["source"], "有实时源时应给出 source key")
+            self.assertTrue(payload["source_note"], "有实时源时应给出说明文案")
+        else:
+            self.assertIsNone(payload["source"], "没有实时源时不应回落到仿真源")
+            self.assertIsNone(payload["source_kind"], "没有实时源时 source_kind 应为 None")
+            self.assertIsNone(payload["source_note"], "没有实时源时 source_note 应为 None")
 
 
 class DeviceStatusTests(StudioTestCase):
@@ -221,7 +240,124 @@ class DeviceStatusTests(StudioTestCase):
 
         sources = payload["sources"]
         self.assertTrue(sources, "设备体检应顺带列出可用数据源")
-        self.assertEqual(sources[0]["key"], "sim-bsense", "首个数据源应为内置仿真源")
+        self.assertTrue(any(item["key"] == "sim-bsense" for item in sources),
+                        "设备体检的数据源列表里应仍含仿真源（供显式选择）")
+
+
+class NoSignalPolicyTests(StudioTestCase):
+    """没有脑机信号时的产品规则（2026-10-07）：
+
+    · 建会话时 `device` 缺省/auto ⇒ 用当前检测到的实时源，**绝不回落仿真**；
+      检测不到实时源 ⇒ `409`，消息里给接入指引；
+    · 设备名只接受 `lsl:<流名称>` 或显式 `sim-bsense`，别的值一律 422；
+    · 声明了 `lsl:<流名>` 但流不可见 ⇒ 409（fail fast，而不是建好会话才发现没信号）。
+
+    注意：这几条要在"有真机"和"无真机"两种环境下都成立——开发机上常常真接着采集设备，
+    所以断言写成"按检测结果分支"，但**每个分支都必须证明没有静默使用仿真**。
+    """
+
+    port_base = 18914
+
+    def _detected(self) -> bool:
+        payload = self.json_body(self.get("/api/devices?probe=1.0"), 200, "设备列表应返回 200")
+        return bool(payload.get("has_real_source"))
+
+    def _create(self, body: dict):
+        return self.post("/api/sessions", {"participant": "ns01", **body})
+
+    def test_default_device_never_falls_back_to_sim(self) -> None:
+        response = self._create({"time_scale": 0.05, "create_subject": True})
+        if self._detected():
+            # 有实时源：应当用实时源（成功），或因为"流在但没样本"而如实失败；
+            # 无论哪种，都**不允许**变成仿真会话。
+            if response.status == 201:
+                payload = response.json()
+                self.assertTrue(str(payload["session"]["source"]).startswith("lsl:"),
+                                "缺省建会话必须用实时源，不能是 sim-bsense")
+                self.delete(f"/api/sessions/{payload['session']['uuid']}")
+            else:
+                error = self.assert_error(response, 409, "conflict",
+                                          "实时源不可用时缺省建会话应 409（不得回落仿真）")
+                self.assertNotIn("sim-bsense", json.dumps(error, ensure_ascii=False),
+                                 "错误信息里不应把仿真源当成回退方案")
+        else:
+            error = self.assert_error(response, 409, "conflict",
+                                      "没有实时信号时缺省建会话应 409（不得回落仿真）")
+            self.assertIn("未检测到脑电信号", error["message"],
+                          "错误信息应说明「未检测到脑电信号」并给出可操作建议")
+
+    def test_auto_device_alias_matches_default(self) -> None:
+        response = self._create({"device": "auto", "time_scale": 0.05, "create_subject": True})
+        if self._detected() and response.status == 201:
+            payload = response.json()
+            self.assertTrue(str(payload["session"]["source"]).startswith("lsl:"),
+                            "device=auto 与缺省同义：应选实时源")
+            self.delete(f"/api/sessions/{payload['session']['uuid']}")
+        else:
+            self.assert_error(response, 409, "conflict", "device=auto 与缺省同义：没有可用实时源应 409")
+
+    def test_unknown_device_is_rejected(self) -> None:
+        response = self._create({"device": "随便写的设备", "time_scale": 0.05, "create_subject": True})
+        self.assert_error(response, 422, "validation_failed", "非法设备名应 422（不再当成仿真）")
+
+    def test_missing_lsl_stream_is_rejected(self) -> None:
+        response = self._create({"device": "lsl:不存在的流-abc", "time_scale": 0.05,
+                                 "create_subject": True})
+        self.assert_error(response, 409, "conflict", "LSL 流不可见时应 409（fail fast）")
+
+    def test_explicit_sim_still_allowed(self) -> None:
+        response = self._create({"device": "sim-bsense", "time_scale": 0.05, "create_subject": True})
+        payload = self.json_body(response, 201, "显式选择仿真源仍应允许（演示/自测）")
+        self.assertEqual(payload["session"]["source"], "sim-bsense", "显式仿真会话应标注 source")
+        self.delete(f"/api/sessions/{payload['session']['uuid']}")
+
+
+class PreviewTests(StudioTestCase):
+    """`/api/devices/preview`：**没开会话**也能看真实信号。
+
+    · 检测到实时源 ⇒ 自动选源可用，且 `kind == "lsl"`（**不会**变成仿真）；
+    · 检测不到 ⇒ 409 + 接入指引；显式 `sim-bsense` 仍可用于演示，并能取到一窗带质检判定的波形。
+    """
+
+    port_base = 18916
+
+    def _detected(self) -> bool:
+        payload = self.json_body(self.get("/api/devices?probe=1.0"), 200, "设备列表应返回 200")
+        return bool(payload.get("has_real_source"))
+
+    def test_preview_auto_source_never_falls_back_to_sim(self) -> None:
+        status = self.json_body(self.get("/api/devices/preview"), 200, "预览状态应返回 200")
+        self.assertFalse(status["active"], "没有启动时 active 应为 False")
+
+        response = self.post("/api/devices/preview", {})
+        if self._detected():
+            payload = self.json_body(response, 200, "检测到实时源时自动选择应成功")
+            self.assertEqual(payload["kind"], "lsl", "自动选源必须是实时流，不能是仿真")
+            self.assertTrue(str(payload["source"]).startswith("lsl:"), "source 应为 lsl:<流名>")
+            # 流在但没推样本时应当如实报"无信号"，而不是伪造数据
+            self.assertIn("no_signal", payload, "预览状态应给出 no_signal")
+            self.delete("/api/devices/preview")
+        else:
+            self.assert_error(response, 409, "conflict", "没有实时信号时自动预览应 409（不得回落仿真）")
+
+    def test_preview_with_explicit_sim_and_window(self) -> None:
+        started = self.json_body(self.post("/api/devices/preview", {"source": "sim-bsense"}),
+                                 200, "显式选择仿真源应能启动预览")
+        self.assertTrue(started["active"], "启动后 active 应为 True")
+        self.assertEqual(started["kind"], "sim", "预览源 kind 应回显 sim")
+
+        frame = self.json_body(self.get("/api/devices/preview?window=1"), 200, "取预览窗应返回 200")
+        self.assertTrue(frame["samples"], "预览窗应带波形采样点")
+        self.assertGreater(len(frame["samples"]), 0, "至少一个通道")
+        self.assertTrue(frame["samples"][0], "采样点不应为空")
+        self.assertIn("quality", frame, "预览窗应带质检判定")
+        self.assertIn("ok", frame["quality"], "质检判定应含 ok")
+        self.assertGreater(frame["seconds"], 0, "应报告实际窗长")
+
+        stopped = self.json_body(self.delete("/api/devices/preview"), 200, "停止预览应返回 200")
+        self.assertTrue(stopped["stopped"], "停止后应回 stopped=true")
+        after = self.json_body(self.get("/api/devices/preview"), 200, "停止后再查状态应 200")
+        self.assertFalse(after["active"], "停止后 active 应为 False")
 
 
 class OpenApiTests(StudioTestCase):
@@ -232,6 +368,8 @@ class OpenApiTests(StudioTestCase):
     # (路径, 方法)：与 docs/API.md 逐一核对
     DOCUMENTED = (
         ("get", "/api/health"), ("get", "/api/config"), ("get", "/api/devices"),
+        ("get", "/api/devices/status"), ("get", "/api/devices/preview"),
+        ("post", "/api/devices/preview"), ("delete", "/api/devices/preview"),
         ("get", "/api/overview"),
         ("get", "/api/subjects"), ("post", "/api/subjects"),
         ("get", "/api/subjects/{public_id}"), ("patch", "/api/subjects/{public_id}"),

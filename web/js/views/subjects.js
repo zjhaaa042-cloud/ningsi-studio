@@ -47,10 +47,14 @@ function fillDeviceOptions(datalist, sources) {
  *
  * 用 datalist 而不是 `<select>`：真实流名称是现场才知道的字符串，select 里没有匹配项时
  * 赋值会被浏览器静默丢弃（值仍是旧选项），而输入框永远能手填；datalist 只是"探测到的候选"。
+ *
+ * 2026-10-07 起**缺省值不再写死 `sim-bsense`**：探测到实时流就填真实流，
+ * 没有信号就留空（提交时后端会 409 并给出接入指引）——仿真源必须由人显式选择。
  */
 function deviceField() {
   const input = el('input', {
-    id: 'session-device', type: 'text', value: 'sim-bsense',
+    id: 'session-device', type: 'text', value: '',
+    placeholder: '例如 lsl:BioMultiLite EEG-xxxx（留空=自动选当前检测到的实时源）',
     attrs: { list: DEVICE_LIST_ID },
   });
   const datalist = el('datalist', { id: DEVICE_LIST_ID });
@@ -259,13 +263,19 @@ function renderNewSessionPanel(ctx, publicId, options = {}) {
     const sources = list(pick(response.data, 'sources', []));
     fillDeviceOptions(deviceOptions, sources);
     const real = sources.filter((item) => pick(item, 'real') && !String(pick(item, 'key', '')).startsWith('unsupported:'));
+    const realDevice = real.find((item) => !pick(item, 'simulated', false)) || real[0] || null;
+    // 缺省跟硬件走：有实时流就预填（用户可以改）；没有就留空，让提交时的 409 提示去指导接线
+    if (realDevice && !deviceInput.value.trim()) deviceInput.value = String(pick(realDevice, 'key', ''));
     const hardwareNote = pick(sources.find((item) => pick(item, 'hardware_note', null)) || {}, 'hardware_note', null);
-    deviceHint.textContent = real.length
-      ? `已探测到 ${real.length} 个实时数据源（下拉可选）：${real.map((item) => pick(item, 'key')).join('、')}；也可手填 lsl:<流名称>`
-      : (hardwareNote || '未探测到实时数据源；仿真源为 sim-bsense，接入设备可手填 lsl:<流名称>');
+    deviceHint.textContent = realDevice
+      ? `已探测到 ${real.length} 个实时数据源（已预填 ${pick(realDevice, 'key')}，下拉可选；也可手填 lsl:<流名称>）`
+        + (pick(realDevice, 'simulated', false) ? '；注意它是内置仿真流，不是真实设备' : '')
+      : (hardwareNote || '未检测到脑电信号：请先启动采集端（如 BioMultiLite / BSense-R）；'
+        + '仅演示/自测时可显式填 sim-bsense（界面与报告会标注为仿真）');
   }).catch((error) => {
     if (ctx.signal.aborted) return;
-    deviceHint.textContent = `数据源探测失败（${describeError(error)}）；仿真源为 sim-bsense，也可手填 lsl:<流名称>`;
+    deviceHint.textContent = `数据源探测失败（${describeError(error)}）；接入设备后可手填 lsl:<流名称>，`
+      + '仅演示/自测时可显式填 sim-bsense';
   });
 
   const labelInput = el('input', { id: 'session-label', type: 'text', placeholder: '例如：第一次训练' });
@@ -304,7 +314,9 @@ function renderNewSessionPanel(ctx, publicId, options = {}) {
     try {
       const response = await api.createSession({
         participant,
-        device: deviceInput.value.trim() || 'sim-bsense',
+        // 空值交给后端解析（=自动选当前检测到的实时源，没有信号就 409），
+        // **不再**在前端补一个 sim-bsense：那正是"静默使用仿真"的来源
+        device: deviceInput.value.trim() || null,
         time_scale: Number(scaleSelect.value),
         training_mode: modeSelect.value,
         label: labelInput.value.trim() || null,
