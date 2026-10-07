@@ -462,6 +462,68 @@ export function render(container, ctx) {
     renderStep();
   };
 
+  /* -------------------------------------------------- 检测完成（一页结论） */
+  /* 为什么单独做：会话跑完后原来只给一张"会话已结束"的小卡 + 尾部再一张"会话当前状态"，
+     操作者仍要自己想"这次测出来什么、报告在哪、产物怎么拿"。这里把结束态收成**一页结论**：
+     三个指标 + 质检可用窗 + 量表 + 四个出口（报告 / 产物 / 训练 / 再测一次）。 */
+  const qualityStats = () => {
+    for (const run of list(pick(local.detail, 'runs', []))) {
+      const payload = pick(run, 'payload', {}) || {};
+      if (run && run.phase === 'qc' && (payload.windows || payload.usable !== undefined)) {
+        return { usable: Number(payload.usable) || 0, windows: Number(payload.windows) || 0,
+                 passed: payload.passed === true };
+      }
+    }
+    return null;
+  };
+
+  const renderDoneCard = () => {
+    const session = ctx.store.state.currentSession || {};
+    const status = pick(session, 'status', 'done');
+    const failed = status === 'failed' || status === 'cancelled';
+    const summary = pick(local.detail, 'indicator_summary', {}) || {};
+    const quality = qualityStats();
+    const scales = [...local.scaleResults.values()];
+    const reason = pick(session, 'error', null) || pick(local.detail, 'error', null);
+
+    const metric = (label, value, note) => el('div', { class: 'done__metric' }, [
+      el('span', { class: 'done__metric-label', text: label }),
+      el('span', { class: 'done__metric-value mono', text: value }),
+      el('span', { class: 'done__metric-note', text: note }),
+    ]);
+
+    const body = [];
+    body.push(el('p', { class: 'done__headline', text: failed
+      ? `这次检测${statusText(status)}${reason ? `：${reason}` : ''}`
+      : '检测完成，数据与报告已生成' }));
+    body.push(el('div', { class: 'done__metrics' }, [
+      metric('专注度', fmtNum(pick(summary, 'focus.mean')), '指标均值 0–1'),
+      metric('放松度', fmtNum(pick(summary, 'relax.mean')), '指标均值 0–1'),
+      metric('认知负荷', fmtNum(pick(summary, 'load.mean')), '指标均值 0–1'),
+      metric('采集质量', quality ? `${fmtInt(quality.usable)}/${fmtInt(quality.windows)} 窗` : DASH,
+        quality ? (quality.passed ? '达到门槛' : '低于门槛，解释需谨慎') : '没有质检记录'),
+    ]));
+    if (scales.length) {
+      body.push(el('p', { class: 'muted', text: '量表：' + scales.map((row) => `${row.code || DASH} 标准分 ${fmtInt(row.standard_score)}`
+        + `（${row.level || DASH}）`).join('｜') }));
+    }
+    body.push(el('p', { class: 'muted', text: '结论、图表、证据与边界声明都在「评估报告」里；'
+      + '原始逐窗数据与产物可整包下载。' }));
+    body.push(el('div', { class: 'row done__actions' }, [
+      failed
+        ? button('重新开始一次检测', () => ctx.navigate('#/start'), { primary: true })
+        : button('查看评估报告', () => ctx.navigate(`#/report?session=${uuid}`), { primary: true }),
+      failed ? button('查看报告', () => ctx.navigate(`#/report?session=${uuid}`), { small: true }) : null,
+      el('a', { href: api.exportZipUrl(uuid), text: '下载全部产物（zip）' }),
+      button('训练视图', () => ctx.navigate(`#/training?session=${uuid}`), { small: true }),
+      button('历史会话', () => ctx.navigate('#/history'), { small: true }),
+      button('再测一次', () => ctx.navigate('#/start'), { small: true }),
+    ]));
+    stepHost.append(card(failed ? '检测未完成' : '检测完成', el('div', { class: 'done' }, body), {
+      sub: `会话 ${String(uuid).slice(0, 8)}…｜${statusText(status)}`,
+    }));
+  };
+
   /* ------------------------------------------------------ 当前该做什么 */
   const renderStep = () => {
     stepHost.textContent = '';
@@ -471,18 +533,7 @@ export function render(container, ctx) {
     // 会话结束后不再显示"当前阶段"：11 个阶段全 done 时 currentPhaseKey() 会退化成第 1 个阶段，
     // 页面就会同时写着"阶段 1/11"和"总进度 100%"，自相矛盾（用户看到的就是这种"乱"）。
     if (local.finished) {
-      stepHost.append(card('会话已结束', el('div', { class: 'step step--done' }, [
-        el('div', { class: 'step__bar' }, [
-          el('div', { class: 'progress', style: 'flex:1' }, [
-            el('div', { class: 'progress__bar', style: 'width:100%' }),
-          ]),
-          el('span', { class: 'mono step__bar-text', text: `全部 ${local.phaseOrder.length} 个阶段已完成` }),
-        ]),
-        el('div', { class: 'row step__action' }, [
-          button('查看评估报告', () => ctx.navigate(`#/report?session=${uuid}`), { primary: true, small: true }),
-          button('实时监测', () => ctx.navigate(`#/live?session=${uuid}`), { small: true }),
-        ]),
-      ]), { sub: '结论、图表与产物都在“评估报告”里' }));
+      renderDoneCard();
       return;
     }
 
@@ -1560,17 +1611,13 @@ export function render(container, ctx) {
         session.error = payload.error;
         ctx.store.setState({ currentSession: session });
         refresh();
+        // 跑完这一刻指标汇总 / qc runs / 产物才齐：重取一次详情，「检测完成」卡才会显示真值而不是 —
+        api.getSession(uuid).then((response) => {
+          if (ctx.signal.aborted) return;
+          local.detail = response.data || local.detail;
+          renderStep();
+        }).catch(() => { /* 详情取不到就用已有数据渲染 */ });
         tailHost.textContent = '';
-        tailHost.append(card('会话结束', el('div', {}, [
-          el('p', { text: `最终状态：${statusText(status)}${payload.error ? `｜错误：${payload.error}` : ''}` }),
-          el('div', { class: 'row' }, [
-            button('查看实时监测', () => ctx.navigate(`#/live?session=${uuid}`)),
-            button('查看报告', () => ctx.navigate(`#/report?session=${uuid}`), { primary: true }),
-            button('训练视图', () => ctx.navigate(`#/training?session=${uuid}`)),
-            button('历史会话', () => ctx.navigate('#/history')),
-            el('a', { href: api.exportZipUrl(uuid), text: '下载全部产物（zip）' }),
-          ]),
-        ])));
         break;
       }
       default:
@@ -1614,6 +1661,7 @@ export function render(container, ctx) {
   api.getSession(uuid).then((response) => {
     if (ctx.signal.aborted) return;
     const data = response.data || {};
+    local.detail = data;                  // 「检测完成」卡要用 indicator_summary / runs(qc) / error
     const session = { ...data };
     if (data.session) Object.assign(session, data.session);
     session.uuid = uuid;
@@ -1664,17 +1712,8 @@ export function render(container, ctx) {
         renderScaleSummary();
       }).catch(() => { /* 报告不可用时不阻塞流程视图 */ });
     }
-    if (data.status && data.status !== 'running') {
-      tailHost.textContent = '';
-      tailHost.append(card('会话当前状态', el('div', {}, [
-        el('p', { text: `${statusText(data.status)}｜阶段 ${phaseText(data.phase, data.phase_label)}` }),
-        el('div', { class: 'row' }, [
-          button('查看报告', () => ctx.navigate(`#/report?session=${uuid}`)),
-          button('历史会话', () => ctx.navigate('#/history')),
-          el('a', { href: api.exportZipUrl(uuid), text: '下载全部产物（zip）' }),
-        ]),
-      ])));
-    }
+    // 不再单列「会话当前状态」卡：结束态现在由上面那张「检测完成 / 检测未完成」卡统一承担
+    // （指标 + 采集质量 + 量表 + 报告/产物/训练/再测一次），重复一张卡只会让页面更长。
     if (list(pick(data, 'alerts', [])).length) {
       const alertHost = el('div');
       tailHost.append(card('预警时间轴', alertHost));

@@ -511,6 +511,25 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
   font-variant-numeric: tabular-nums;
 }
 
+/* ------------------------------------------------ 检测完成（一页结论） */
+.done { display: flex; flex-direction: column; gap: 10px; }
+.done__headline { margin: 0; font-size: 18px; font-weight: 600; }
+.done__metrics { display: flex; flex-wrap: wrap; gap: 10px; }
+.done__metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.done__metric-label { font-size: 12px; color: var(--text-3); }
+.done__metric-value { font-size: 20px; }
+.done__metric-note { font-size: 11px; color: var(--text-3); }
+.done__actions { align-items: center; gap: 10px; flex-wrap: wrap; }
+
 /* 刺激区可点击作答（鼠标/触屏用户不该被"只能按空格"挡住） */
 .task-stage--clickable { cursor: pointer; }
 .task-stage--clickable:hover { border-color: var(--line-strong); }
