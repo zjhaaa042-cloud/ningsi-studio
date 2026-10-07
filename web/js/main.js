@@ -14,6 +14,7 @@ import { describeError, store, toast } from './store.js';
 import { button, el, fmtInt, list, pick, statusText } from './util.js';
 
 import * as dashboard from './views/dashboard.js';
+import * as start from './views/start.js';
 import * as subjects from './views/subjects.js';
 import * as flow from './views/flow.js';
 import * as live from './views/live.js';
@@ -22,7 +23,10 @@ import * as history from './views/history.js';
 import * as report from './views/report.js';
 import * as panels from './views/panels.js';
 
+// 「开始检测」放第一个：这是一个"跑一次检测"的产品，第一次用的人应该先看到它，
+// 而不是先看到仪表盘/被试/设备这些零件。
 const ROUTES = [
+  { path: '#/start', label: '开始检测', module: start },
   { path: '#/dashboard', label: '仪表盘', module: dashboard },
   { path: '#/subjects', label: '被试管理', module: subjects },
   { path: '#/flow', label: '会话流程', module: flow },
@@ -34,7 +38,7 @@ const ROUTES = [
   { path: '#/devices', label: '设备状态', module: panels.devices },
 ];
 
-const DEFAULT_ROUTE = '#/dashboard';
+const DEFAULT_ROUTE = '#/start';
 
 /** 应用级运行时：路由、清理函数、当前控制器。 */
 const app = {

@@ -95,25 +95,28 @@ export function render(container, ctx) {
   }
 
   /* ------------------------------------------------------------ 页面骨架 */
+  // 操作者动作（实时监测 / 报告 / 取消会话）：被测者视图下整行隐藏——
+  // 电脑在被测者手里时，「取消会话」不该是一个能被误点的按钮。
+  const headActions = el('div', { class: 'row' }, [
+    el('span', { class: 'badge', text: `会话 ${uuid.slice(0, 8)}…` }),
+    button('实时监测', () => ctx.navigate(`#/live?session=${uuid}`)),
+    button('报告', () => ctx.navigate(`#/report?session=${uuid}`)),
+    button('取消会话', async (event) => {
+      const node = event.currentTarget;
+      node.disabled = true;
+      try {
+        await api.cancelSession(uuid);
+        toast('已请求取消本次会话', 'info');
+      } catch (error) {
+        toast(describeError(error));
+      } finally {
+        node.disabled = false;
+      }
+    }),
+  ]);
   const head = el('div', { class: 'row row--between' }, [
     el('h1', { text: '会话流程' }),
-    el('div', { class: 'row' }, [
-      el('span', { class: 'badge', text: `会话 ${uuid.slice(0, 8)}…` }),
-      button('实时监测', () => ctx.navigate(`#/live?session=${uuid}`)),
-      button('报告', () => ctx.navigate(`#/report?session=${uuid}`)),
-      button('取消会话', async (event) => {
-        const node = event.currentTarget;
-        node.disabled = true;
-        try {
-          await api.cancelSession(uuid);
-          toast('已请求取消本次会话', 'info');
-        } catch (error) {
-          toast(describeError(error));
-        } finally {
-          node.disabled = false;
-        }
-      }),
-    ]),
+    headActions,
   ]);
 
   const stepHost = el('div');
@@ -364,23 +367,51 @@ export function render(container, ctx) {
     });
   };
 
+  /* ------------------------------------------------------ 被测者视图（全屏） */
+  /* 给别人用的时候，电脑是交给被测者的：顶栏、左侧导航、仪表盘对他全是干扰。
+     进入后只留"现在该做什么 + 任务区"，操作者按 Esc 或点按钮退出（不会中断会话）。 */
+  const setSubjectMode = (on) => {
+    local.subjectMode = on === true;
+    document.body.classList.toggle('subject-mode', local.subjectMode);
+    taskBarHost.classList.toggle('flow-taskbar--subject', local.subjectMode);
+    // 被测者视图里不显示"实时监测 / 报告 / 取消会话"（防误点取消）
+    headActions.style.display = local.subjectMode ? 'none' : '';
+    local.taskBarKey = null;                     // 强制重建任务条（按钮文案/按钮集变了）
+    syncTaskMode();
+  };
+  const onSubjectKey = (event) => {
+    if (event.key === 'Escape' && local.subjectMode) setSubjectMode(false);
+  };
+  window.addEventListener('keydown', onSubjectKey);
+  ctx.onCleanup(() => {
+    window.removeEventListener('keydown', onSubjectKey);
+    document.body.classList.remove('subject-mode');   // 离开本页一定恢复操作者界面
+  });
+
   const renderTaskBar = (label) => {
-    const key = `${label}|${local.forceOverview ? 'overview' : 'task'}`;
+    const key = `${label}|${local.forceOverview ? 'overview' : 'task'}|${local.subjectMode ? 'subject' : 'op'}`;
     if (key === local.taskBarKey) return;                 // 幂等：观察者回调里重复调用不再改 DOM
     local.taskBarKey = key;
     taskBarHost.textContent = '';
-    if (!label) return;
+    // 没有交互任务、但在被测者视图里时：也要给一条"退出"入口，否则隐藏了导航就没有出路
+    if (!label && !local.subjectMode) return;
+    const subjectButton = local.subjectMode
+      ? button('退出被测者视图（Esc）', () => setSubjectMode(false), { small: true })
+      : button('被测者视图（全屏）', () => setSubjectMode(true), { small: true });
     taskBarHost.append(
-      el('span', { class: 'badge badge--strong', text: '任务进行中' }),
-      el('strong', { text: label }),
-      el('span', { class: 'muted', text: TASK_MODE_HINT }),
+      el('span', { class: 'badge badge--strong', text: local.subjectMode ? '被测者请按提示操作' : '任务进行中' }),
+      el('strong', { text: label || '按屏幕上的提示做即可' }),
+      el('span', { class: 'muted', text: local.subjectMode
+        ? '只显示当前要做的动作；操作者按 Esc 退出'
+        : TASK_MODE_HINT }),
       el('div', { class: 'row row--end', style: 'margin-left:auto' }, [
-        button(local.forceOverview ? '回到任务视图' : '查看总览', () => {
+        local.subjectMode ? null : button(local.forceOverview ? '回到任务视图' : '查看总览', () => {
           local.forceOverview = !local.forceOverview;
           local.taskBarKey = null;                        // 强制重建任务条
           syncTaskMode();
           tighten();
         }),
+        subjectButton,
       ]),
     );
   };
@@ -1549,6 +1580,10 @@ export function render(container, ctx) {
 
   /* -------------------------------------------------------- 初次加载 */
   refresh();
+
+  // 从「开始检测」向导过来时带 ?subject=1：**自动进入被测者视图**——操作者点完"开始检测"
+  // 就可以把电脑交给被测者，不用再教他点什么。
+  if (ctx.params.get('subject') === '1') setSubjectMode(true);
 
   // 阶段清单必须带引导字段（headline/details/duration/advance）。
   // `started` 事件只在会话刚开始时推一次，页面在会话中途才打开时收不到，

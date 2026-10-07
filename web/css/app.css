@@ -303,7 +303,12 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
    SSE 增量更新与验收脚本对 .scale-item / 阶段留白的断言都不受影响。 */
 .flow-taskbar { display: none; }
 
-.flow-taskbar--on {
+.flow-taskbar--on,
+/* 被测者视图下**必须始终可见**：这时顶栏与导航都被隐藏了，
+   任务条上的「退出被测者视图（Esc）」是唯一的可见出口。
+   （原来只在有交互任务时显示，自动阶段——如设备质检/基线——就会没有任何出口。
+   实测截图发现：`--subject` 单独出现时被 `.flow-taskbar{display:none}` 盖掉了。） */
+.flow-taskbar--subject {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -509,6 +514,79 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 /* 刺激区可点击作答（鼠标/触屏用户不该被"只能按空格"挡住） */
 .task-stage--clickable { cursor: pointer; }
 .task-stage--clickable:hover { border-color: var(--line-strong); }
+
+/* ------------------------------------------------------ 被测者视图（全屏） */
+/* 把"操作者界面"（顶栏 + 左侧导航）整体隐藏，只留当前阶段说明与任务区。
+   为什么：给别人用的时候，电脑是交给被测者的，导航/仪表盘/设备状态对他只有干扰。
+   操作者按 Esc（或任务条上的按钮）即可退出，见 flow.js 的 setSubjectMode()。 */
+body.subject-mode .topbar,
+body.subject-mode .sidenav { display: none; }
+body.subject-mode .layout { min-height: 100%; }
+body.subject-mode .view { padding: 10px 16px 28px; }
+
+/* ------------------------------------------------------------ 开始检测向导 */
+.wizard__steps { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.wizard__step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-3);
+}
+.wizard__step--now { border-color: var(--text-2); color: var(--text); border-left-width: 3px; }
+.wizard__step--done { color: var(--text-3); border-style: dashed; }
+.wizard__step-no { font-size: 12px; }
+.wizard__step-title { font-weight: 600; }
+.wizard__step-hint { font-size: 12px; }
+.wizard__foot { margin-top: 14px; }
+.wizard__sep { border: 0; border-top: 1px dashed var(--line); margin: 14px 0; }
+.wizard__ok { color: var(--text); font-weight: 600; margin: 0; }
+.wizard__warn { color: var(--text); font-weight: 600; margin: 0; }
+.wizard__plan { margin: 4px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+
+/* 大块单选（被试/设备/节奏都用它，点一下即选中） */
+.pick-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.pick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 150px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+}
+.pick:hover { border-color: var(--line-strong); }
+.pick--on { border-color: var(--text-2); background: var(--surface-2); color: var(--text); }
+.pick__title { font-size: 13px; font-weight: 600; }
+.pick__note { font-size: 12px; color: var(--text-3); }
+
+.choice-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  flex: 1 1 260px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+}
+.choice:hover { border-color: var(--line-strong); }
+.choice--on { border-color: var(--text-2); background: var(--surface-2); color: var(--text); }
+.choice__title { font-size: 15px; font-weight: 600; }
+.choice__note { font-size: 12px; line-height: 1.5; color: var(--text-3); }
 
 /* ------------------------------------------------------------------ 表单 */
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }

@@ -143,9 +143,11 @@ export async function render(container, ctx) {
     el('h1', { text: '仪表盘' }),
     // 会话只能在被试页创建（要先选/建被试），所以这里是"跳转"而不是"直接建会话"：
     // 按钮文案必须说明它只是导航，避免误解为点一下就建好会话
-    button('去创建会话', () => ctx.navigate('#/subjects'), {
+    // 主行动：直接进「开始一次检测」向导（选被试 → 确认设备 → 开始）。
+    // 原来跳"被试管理"再让人自己找表单，对第一次用的人不清晰。
+    button('开始一次检测', () => ctx.navigate('#/start'), {
       primary: true,
-      title: '前往“被试管理”：先选好被试，再点“开始新会话”',
+      title: '三步向导：选/建被试 → 确认设备有信号 → 选节奏后开始',
     }),
   ]));
 
@@ -350,7 +352,7 @@ export async function render(container, ctx) {
       },
       { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
       { title: '开始时间', render: (row) => fmtTime(row.started_at) },
-    ], sessionRows) : empty('还没有会话记录，点右上角“去创建会话”到被试管理里开始一次完整流程。'),
+    ], sessionRows) : empty('还没有会话记录，点右上角“开始一次检测”走一遍完整流程。'),
   ], { sub: '点击会话编号进入实时监测；「阶段 / 结束原因」说明会话停在哪一步、为什么' });
   page.append(sessionsCard);
 
