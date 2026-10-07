@@ -614,6 +614,10 @@ def build_router(settings: Settings) -> Router:
             payload["runs"] = runs
             payload["artifacts"] = jsonable(schemas.rows_to_dicts(repo.list_artifacts(conn, row["id"])))
             payload["indicator_summary"] = jsonable(repo.latest_metric_summary(conn, row["id"]))
+            # 本次会话的阶段表**按它自己的协议档**给出：短协议是 9 步。
+            # 不返回它的话，直接打开 `#/flow?session=…` 的页面只能退回前端写死的 11 步兜底表，
+            # 细条就会显示"第 5 / 11 步"（实测踩到）。
+            payload["phases"] = phase_module.as_list(payload.get("protocol"))
         runtime = manager.get(uuid)
         actual_source = getattr(getattr(runtime, "source", None), "key", None)
         if actual_source:

@@ -322,6 +322,17 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 
 .flow--task .flow-overview { display: none; }
 
+/* ---------------------------------------------- 会话流程：一个阶段一页（2026-10-07）
+   用户要求："每个阶段占一个页面，完成之后再切换到下一个页面，尽量不要上下滑动"。
+   做法：
+   - 本阶段页（.flow-stage）高度由 JS 按视口实测写入（见 flow.js 的 fitStage()），
+     内部超出时**只在本阶段页里**滚动，页面本身不滚动；
+   - 总览（11 步步进条 + 量表汇总 + 尾部卡）默认隐藏，点任务条上的「查看全部阶段」才出现。 */
+.flow--stage { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.flow--stage .flow-stage { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 2px; }
+.flow--stage .flow-overview { display: none; }
+.flow--overview .flow-stage { display: none; }
+
 /* 当前阶段卡：一条细进度 + 阶段名 + 一句该做什么 + 唯一主按钮，其余进折叠区。
    设计依据：GOV.UK 任务清单模式（长流程用"步骤 + 状态"表达，页面只留一个主行动）
    https://design-system.service.gov.uk/components/task-list/
@@ -543,6 +554,24 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 /* 刺激区可点击作答（鼠标/触屏用户不该被"只能按空格"挡住） */
 .task-stage--clickable { cursor: pointer; }
 .task-stage--clickable:hover { border-color: var(--line-strong); }
+
+/* PVT-B 刺激：红点 + 毫秒计数器（经典 PVT-B 的视觉计时器；之前这里只有占位符 •） */
+.task-stage__dot {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  margin: 6px auto 2px;
+  background: radial-gradient(circle at 35% 30%, #ff6b6b, #c62828 70%);
+  box-shadow: 0 0 28px rgba(198, 40, 40, .55);
+}
+.task-stage__dot--idle {
+  background: transparent;
+  border: 2px dashed var(--line-strong);
+  box-shadow: none;
+  opacity: .55;
+}
+.task-stage__counter { font-size: 22px; text-align: center; letter-spacing: 1px; }
+.task-stage__waiting { color: var(--text-3); font-size: 13px; text-align: center; }
 
 /* ------------------------------------------------------ 被测者视图（全屏） */
 /* 把"操作者界面"（顶栏 + 左侧导航）整体隐藏，只留当前阶段说明与任务区。

@@ -59,6 +59,19 @@ const SCALE_INSTRUCTION_FALLBACK = '请按最近一周的实际感受作答；�
  */
 const TASK_WAIT_KEYS = ['sart', 'pvt'];
 
+/**
+ * 任务名归一：后端 PVT 的 `sequence_payload()` 里 `task` 是 `pvt-b`，
+ * 而事件外层用的是 `pvt`。历史实现按 `payload.task === 'pvt'` 分支，遇到 `pvt-b`
+ * 就会渲染成 SART 卡（实测导致"PVT 阶段先出现一张 SART 卡、刺激看不到"）。
+ * 这里统一按前缀归一，前后端任一侧写法变化都不会再走错分支。
+ */
+const taskKey = (value) => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw.startsWith('pvt')) return 'pvt';
+  if (raw.startsWith('sart')) return 'sart';
+  return raw;
+};
+
 /** 中途打开时该试次的恢复提示：刺激已过去，不能伪造反应时，只能如实记为未作答。 */
 const RESTORE_HINT = '已恢复：本试次刺激在页面打开前已呈现，无法重放；本试次按"未作答"记录，下一试次起正常。';
 
@@ -70,12 +83,16 @@ const ADVANCE_TEXT = {
 };
 
 /**
- * 试次事件到刺激真正呈现之间的服务端延时（秒）。
- * 服务端在 publish("trial") 之后才 sleep 再取下一窗刺激（见 core/runtime.py 的 _run_sart/_run_pvt），
- * 因此前端测到的 elapsed 里包含这段延时；上报 rt 时必须扣掉，否则会系统性偏长。
- * PVT 的 onset 是绝对时刻，按 onset 差值计算更准，故单独处理。
+ * 试次事件的到达时刻**就是刺激呈现时刻**，不要再扣任何"起步延时"。
+ *
+ * 2026-10-07 修正（用户反馈「SART 和 PVT-B 显示的时间总是 0.05s」）：
+ * 这里原来扣 `TRIAL_START_DELAY = {sart_main: 2.2, sart_practice: 1.6}`（正好等于整个 SOA）。
+ * 但服务端是 **publish("trial") 即为刺激时刻**（`_run_sart` 里 publish 之后才 `wait_for_input`，
+ * 固定 SOA 的 sleep 发生在两次 publish 之间），前端也是收到事件就立刻画数字；
+ * 于是 `elapsed - 2.2` 对任何真人都是负数，反应时永远被钳到下限 0.05 s。
+ * PVT 仍保留一项目标：用相邻 onset 差值校准本地时钟（`delay`），SART 恒为 0。
  */
-const TRIAL_START_DELAY = { sart_main: 2.2, sart_practice: 1.6 };
+const TRIAL_CLOCK_CORRECTION_ONLY = true;
 
 export function render(container, ctx) {
   container.textContent = '';
@@ -126,16 +143,16 @@ export function render(container, ctx) {
   const scaleSummaryHost = el('div');
   const tailHost = el('div');
   const taskBarHost = el('div', { class: 'flow-taskbar' });
-  // 「总览」= 当前阶段状态卡 + 阶段清单 + 汇总 + 尾部；被测者作答时整块折叠掉（见 syncTaskMode）。
-  // 只折叠显示，不删除节点：中途刷新恢复、阶段留白断言、SSE 更新都不受影响。
-  //
-  // 为什么把"总体进度"并进"当前该做什么"：原来是两张卡，各自重复一遍"当前阶段/百分比/状态/设备"，
-  // 用户反馈"页面混乱"主要就来自这种重复。现在合成一张：顶部一条细进度 + 阶段 x/11，
-  // 下面是这一步要做什么与唯一的主按钮，其余说明收进「本阶段要做什么」折叠区。
+
+  /* 一个阶段一页（2026-10-07 用户要求："每个阶段占一个页面，完成之后再切换到下一个页面，
+     尽量不要上下滑动"）。于是 DOM 分成两摞：
+       · stageHost    = **本阶段这一页**：当前阶段卡 + 提示 + 该阶段的作答/结果区（占满视口）
+       · overviewHost = 全部阶段步进条 + 量表汇总 + 尾部卡（默认隐藏，点"查看全部阶段"才出现）
+     只改显示不删节点：SSE 增量更新、中途刷新恢复、验收对 .phase-item / .scale-item 的断言都不受影响。 */
+  const stageHost = el('div', { class: 'flow-stage' });
+  stageHost.append(stepHost, noticeHost, interactionHost);
   const overviewHost = el('div', { class: 'flow-overview' });
   overviewHost.append(
-    stepHost,
-    noticeHost,
     card('全部阶段', phaseHost, {
       sub: '共 11 步：✓ 已完成 / 高亮 当前 / 灰 待开始；点任意一步，说明显示在下方',
     }),
@@ -145,8 +162,8 @@ export function render(container, ctx) {
 
   container.append(head);
   container.append(taskBarHost);
+  container.append(stageHost);
   container.append(overviewHost);
-  container.append(interactionHost);
 
   /* ---------------------------------------------------- 页面密度（压高） */
   /* 为什么压：`#/flow` 要在 1600×1000 的演示窗口里一屏看全，原来"全部阶段"每项一行、
@@ -293,8 +310,18 @@ export function render(container, ctx) {
     });
   };
   tighten();
+  /** 本阶段页的可用高度 = 视口高度 − 页面标题行与任务条占掉的部分（实测而非写死数值）。
+   *  目的：一个阶段一页、**页面本身不滚动**（内容超出时只在本阶段页内部滚动）。 */
+  const fitStage = () => {
+    const next = container.classList.contains('flow--stage')
+      ? `${Math.round(Math.max(320, window.innerHeight - container.getBoundingClientRect().top - 12))}px`
+      : '';
+    if (container.style.height !== next) container.style.height = next;   // 幂等：避免观察者自激
+  };
+
   const densityObserver = new MutationObserver(() => {
-    // 顺序有讲究：先切"任务视图/总览"，再压密度；两者都是幂等的，
+    // 观察者只监听 childList/subtree，改 style 不会再次触发（改 height 前还做了相等判断）
+    // 顺序有讲究：先切"本阶段页/总览"，再压密度；两者都是幂等的，
     // 且 renderTaskBar 只在标题或模式变化时才重建节点，不会自激。
     syncTaskMode();
     tighten();
@@ -312,6 +339,8 @@ export function render(container, ctx) {
     skippedTasks: new Set(),        // 已补过"未作答"上报的行为任务（每任务最多补一次，避免吃掉后续真实试次）
     phaseState: new Map(),          // key → { label, state, progress }
     phaseOrder: PHASE_FALLBACK.slice(),
+    phaseOrderIsSession: false,     // 阶段表是否来自会话（短协议 9 步）；config 只补文案不换集合
+    guidance: [],                   // /api/config 的阶段引导字段（headline/details/why…）
     scales: new Map(),              // code → 已渲染的作答区状态
     scaleResults: new Map(),        // code → 后端计分结果（用于"量表计分汇总"卡）
     trial: null,                    // { task, phase, index, digit, total, keyReady, answer }
@@ -389,26 +418,37 @@ export function render(container, ctx) {
   });
 
   const renderTaskBar = (label) => {
-    const key = `${label}|${local.forceOverview ? 'overview' : 'task'}|${local.subjectMode ? 'subject' : 'op'}`;
+    // 幂等键必须包含"第几步/共几步"：阶段表会从兜底 11 步换成会话自己的 9 步（短协议），
+    // 只按 label/模式做键会让细条早退、一直显示旧步数（实测踩到「第 1 / 11 步」）。
+    const phaseKeyNow = currentPhaseKey();
+    const indexNow = local.phaseOrder.findIndex((item) => item.key === phaseKeyNow);
+    const key = `${label}|${local.forceOverview ? 'overview' : 'stage'}|${local.subjectMode ? 'subject' : 'op'}`
+      + `|${indexNow + 1}/${local.phaseOrder.length}`;
     if (key === local.taskBarKey) return;                 // 幂等：观察者回调里重复调用不再改 DOM
     local.taskBarKey = key;
     taskBarHost.textContent = '';
-    // 没有交互任务、但在被测者视图里时：也要给一条"退出"入口，否则隐藏了导航就没有出路
-    if (!label && !local.subjectMode) return;
+    // 一个阶段一页：这条细条**始终显示**（它同时承担"第 x/y 步 + 阶段名"和「查看全部阶段」入口）
+    const phaseKey = phaseKeyNow;
+    const index = indexNow;
+    const phaseRow = local.phaseOrder[index] || {};
+    const title = label || pick(phaseRow, 'label', null) || '会话流程';
+    const stepText = local.forceOverview
+      ? `第 ${index + 1} / ${local.phaseOrder.length} 步 · 正在看全部阶段`
+      : `第 ${index + 1} / ${local.phaseOrder.length} 步`;
     const subjectButton = local.subjectMode
       ? button('退出被测者视图（Esc）', () => setSubjectMode(false), { small: true })
       : button('被测者视图（全屏）', () => setSubjectMode(true), { small: true });
     taskBarHost.append(
-      el('span', { class: 'badge badge--strong', text: local.subjectMode ? '被测者请按提示操作' : '任务进行中' }),
-      el('strong', { text: label || '按屏幕上的提示做即可' }),
-      el('span', { class: 'muted', text: local.subjectMode
-        ? '只显示当前要做的动作；操作者按 Esc 退出'
-        : TASK_MODE_HINT }),
+      el('span', { class: 'badge badge--strong', text: local.subjectMode ? '被测者请按提示操作'
+        : (label ? '任务进行中' : '本阶段') }),
+      el('strong', { text: title }),
+      el('span', { class: 'muted', text: stepText }),
       el('div', { class: 'row row--end', style: 'margin-left:auto' }, [
-        local.subjectMode ? null : button(local.forceOverview ? '回到任务视图' : '查看总览', () => {
+        local.subjectMode ? null : button(local.forceOverview ? '回到本阶段' : '查看全部阶段', () => {
           local.forceOverview = !local.forceOverview;
           local.taskBarKey = null;                        // 强制重建任务条
           syncTaskMode();
+          if (!local.forceOverview) window.scrollTo({ top: 0 });
           tighten();
         }),
         subjectButton,
@@ -418,14 +458,22 @@ export function render(container, ctx) {
 
   const syncTaskMode = () => {
     const label = taskModeLabel();
-    if (label && label !== local.lastTaskLabel) local.forceOverview = false;   // 换任务 → 回任务视图
+    if (label && label !== local.lastTaskLabel) local.forceOverview = false;   // 换任务 → 回本阶段页
     local.lastTaskLabel = label;
+    if (!label) clearTaskStage(null);   // 离开量表/SART/PVT：舞台卡不该留在页面上
     markTaskCards();
-    taskBarHost.classList.toggle('flow-taskbar--on', !!label);
+    taskBarHost.classList.add('flow-taskbar--on');       // 细条常显（见 renderTaskBar 注释）
+    // 一个阶段一页：默认只显示"本阶段这一页"，总览（11 步步进条 + 汇总 + 尾部）要显式点开。
+    // 交互阶段（量表/SART/PVT）额外挂 flow--task，让本阶段页更紧凑（只留任务）。
+    container.classList.toggle('flow--stage', !local.forceOverview);
     container.classList.toggle('flow--task', !!label && !local.forceOverview);
     renderTaskBar(label);
+    fitStage();
   };
-  ctx.onCleanup(() => container.classList.remove('flow--task'));
+  ctx.onCleanup(() => {
+    container.classList.remove('flow--task');
+    container.classList.remove('flow--stage');
+  });
 
   /** 当前应该被高亮的阶段：进行中的优先，否则取最后一个已完成的下一阶段。 */
   const currentPhaseKey = () => {
@@ -1061,19 +1109,74 @@ export function render(container, ctx) {
     return slot;
   };
 
-  const renderTaskStage = (task, { digit = null, phaseLabel = '', index = null, total = null, hint = '', answered = false } = {}) => {
+  /**
+   * 清掉**不再活跃的任务舞台**（换任务、或离开任务阶段时）。
+   *
+   * 2026-10-07 实测发现：进入 PVT 阶段时 SART 的舞台卡还留在页面上，
+   * DOM 里同时存在 `.task-stage__digit`（SART 残留）与红点/计数器（PVT），
+   * 人看到的是旧的 SART 卡 → 用户反馈「PVT-B 的刺激是什么？我没看到」。
+   * 只清 `TASK_WAIT_KEYS` 里的舞台，不动结果卡（result-sart / monitor 等）。
+   */
+  const clearTaskStage = (keep = null) => {
+    for (const key of TASK_WAIT_KEYS) {
+      if (key === keep) continue;
+      const slot = local.taskSlots && local.taskSlots.get(key);
+      if (slot) {
+        slot.host.textContent = '';
+        slot.stage = null;
+        slot.timer = null;
+        slot.counter = null;
+      }
+    }
+    if (!keep) clearStimulusTicker();
+  };
+
+  /**
+   * 任务舞台（SART 数字 / PVT-B 红点+毫秒计时器）。
+   *
+   * `stimulus`：本试次的刺激是否已呈现。
+   * - SART：刺激就是数字，收到试次即呈现（默认 true）；
+   * - PVT-B：**必须显式画刺激**——2026-10-07 用户反馈「PVT-B 的刺激是什么？我没看到」，
+   *   原因是这里原来给 PVT 画了一个占位符 `•`，全代码没有任何红点/计时器；
+   *   而服务端指导语写的是「屏幕出现计时器时尽快按空格」（经典 PVT-B 用视觉毫秒计数器）。
+   *   现在：等待期显示"等待光点…"，刺激到来时画红点 + 从 0 开始的毫秒计数。
+   */
+  const renderTaskStage = (task, { digit = null, phaseLabel = '', index = null, total = null,
+                                   hint = '', answered = false, stimulus = null } = {}) => {
     const slot = ensureTaskSlot(task);
+    clearTaskStage(task);          // 换任务时把另一个任务的舞台清掉（否则同屏两张刺激卡）
     slot.host.textContent = '';
     const title = task === 'sart' ? 'SART 持续注意任务' : 'PVT-B 警觉度任务';
     const timer = el('div', { class: 'task-stage__timer', text: '' });
-    const stage = el('div', { class: 'task-stage' }, [
-      el('div', { class: 'task-stage__digit', text: task === 'sart' && digit !== null ? String(digit) : '•' }),
-      el('p', { class: 'muted', text: hint || (task === 'sart'
-        ? '看到 1–9 按空格；看到 3 不要按（是否该按由服务端判定）。'
-        : '刺激出现后尽快按空格。') }),
+    const isPvt = task !== 'sart';
+    const showStimulus = isPvt ? stimulus === true : true;
+    const stage = el('div', { class: 'task-stage' + (isPvt && showStimulus ? ' task-stage--pvt-on' : '') });
+    if (isPvt) {
+      if (showStimulus) {
+        // 红点 + 毫秒计数器：两者同时出现，被试看到就尽快按空格
+        const counter = el('div', { class: 'task-stage__counter mono', text: '0 ms' });
+        stage.append(
+          el('div', { class: 'task-stage__dot', 'aria-label': 'PVT 刺激：红点' }),
+          counter,
+        );
+        slot.counter = counter;
+      } else {
+        stage.append(
+          el('div', { class: 'task-stage__dot task-stage__dot--idle', 'aria-label': '等待刺激' }),
+          el('div', { class: 'task-stage__waiting', text: '等待光点…（出现再按，抢答不计）' }),
+        );
+        slot.counter = null;
+      }
+    } else {
+      stage.append(el('div', { class: 'task-stage__digit', text: digit !== null ? String(digit) : '•' }));
+    }
+    stage.append(
+      el('p', { class: 'muted', text: hint || (isPvt
+        ? '光点出现后尽快按空格（按下即记录反应时）。'
+        : '看到 1–9 按空格；看到 3 不要按（是否该按由服务端判定）。') }),
       el('p', { class: 'mono', text: `第 ${fmtInt(index)} 试次${total ? ` / ${fmtInt(total)}` : ''}${phaseLabel ? `｜${phaseLabel}` : ''}` }),
       timer,
-    ]);
+    );
     // 鼠标/触屏也能作答：原来只有空格键，现场拿鼠标的人"点了没反应"。
     // 快速演示模式下服务端自动作答，这里不给按钮，避免重复提交。
     const actions = [];
@@ -1093,6 +1196,25 @@ export function render(container, ctx) {
     slot.timer = timer;
     return slot;
   };
+
+  /** PVT 的毫秒计数器：只在刺激呈现期间走，随舞台重建而停。 */
+  const clearStimulusTicker = () => {
+    if (local.stimulusTicker) {
+      window.clearInterval(local.stimulusTicker);
+      local.stimulusTicker = null;
+    }
+  };
+  const startStimulusTicker = (trial) => {
+    clearStimulusTicker();
+    const slot = local.taskSlots && local.taskSlots.get('pvt');
+    if (!slot || !slot.counter || !trial) return;
+    const startedAt = performance.now();
+    local.stimulusTicker = window.setInterval(() => {
+      if (local.trial !== trial || !slot.counter) { clearStimulusTicker(); return; }
+      slot.counter.textContent = `${fmtInt(Math.max(0, Math.round(performance.now() - startedAt)))} ms`;
+    }, 50);
+  };
+  ctx.onCleanup(clearStimulusTicker);
 
   /**
    * 把行为任务区带到视口中央，**只在任务开始时做一次**。
@@ -1170,11 +1292,14 @@ export function render(container, ctx) {
     return firstHost;
   };
 
-  /** 反应时（秒）：把服务端"事件→刺激"的延时扣掉，并做最小钳制避免负值。 */
+  /**
+   * 反应时（秒）= 按键时刻 − 刺激呈现时刻，只扣 PVT 的时钟校准项。
+   * 下限 0.05 只作"异常值兜底"（服务端也钳 0.05–10.0），正常情况下不该再恒等于 0.05。
+   */
   const reactionTime = (trial) => {
     const elapsed = (performance.now() - trial.onset) / 1000;
-    const delay = trial.delay || 0;
-    return Math.max(0.05, elapsed - delay);
+    const correction = Math.max(0, trial.delay || 0);
+    return Math.max(0.05, elapsed - correction);
   };
 
   /** 作答当前试次（空格键 / 点击刺激区 / 点「点击作答」按钮都走这里）。 */
@@ -1192,7 +1317,20 @@ export function render(container, ctx) {
     const tag = (event.target && event.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     event.preventDefault();
-    answerCurrent(local.trial);
+    const current = local.trial;
+    const waitingPvt = taskKey((local.behaviorRequest || {}).task) === 'pvt'
+      && (!current || current.answer || !current.stimulus);
+    if (waitingPvt) {
+      // 抢答：刺激还没出现就按。**只做现场反馈**——此刻服务端还没在等这个试次，
+      // 提交也没有归属（会 409）；不伪造数据，也不假装服务端已记账。
+      const now = Date.now();
+      if (!local.lastEarlyWarn || now - local.lastEarlyWarn > 1200) {
+        local.lastEarlyWarn = now;
+        toast('抢答：光点还没出现，这一次不计入反应时', 'info');
+      }
+      return;
+    }
+    answerCurrent(current);
   };
   window.addEventListener('keydown', onKeyDown);
   // 视图卸载时摘掉监听，避免其它视图误触发
@@ -1252,12 +1390,19 @@ export function render(container, ctx) {
     trial.posting = true;
     trial.keyReady = false;
     clearTrialWindow();
+    // 注意：必须先解构出 task，再用它——2026-10-07 我把 clearStimulusTicker() 写在解构之前，
+    // 触发 `ReferenceError: Cannot access 'task' before initialization`（TDZ），
+    // submitTrial 每次抛错 → 一个试次都提交不出去 → 服务端按"连续 5 个试次没有有效作答"
+    // 判 SART 阶段失败。教训：这个文件里"新加的清理调用"必须放在解构之后。
     const { task, phase, index, answer } = trial;
+    if (task === 'pvt') clearStimulusTicker();   // 刺激结束：计数器停，舞台切回"等待光点"
     renderTaskStage(task, {
       digit: trial.digit,
       index: trial.index + 1,
       total: trial.total,
       phaseLabel: phase === 'practice' ? '练习' : '正式',
+      // PVT 答完立刻回到"等待下一个光点"；SART 继续显示刚作答的数字（供核对）
+      stimulus: task === 'sart',
       hint: answer.responded ? `已记录：反应时 ${fmtNum(answer.rt, 3)} s` : '本试次未按键',
       answered: true,
     });
@@ -1447,9 +1592,12 @@ export function render(container, ctx) {
       }
       case 'behavior_request': {
         local.behaviorRequest = payload;
-        if (payload.task === 'pvt') {
+        const key = taskKey(payload.task);
+        if (key === 'pvt') {
+          // 先进入"等待光点"状态：PVT 的刺激要等 trial 事件到来才画
           revealTaskStage(renderTaskStage('pvt', {
-            hint: 'PVT-B：刺激出现后尽快按空格（试次数与刺激时刻表由接口下发）。',
+            stimulus: false,
+            hint: 'PVT-B：屏幕出现光点后尽快按空格；没出现就按算抢答（不计入）。',
           }));
         } else {
           revealTaskStage(renderTaskStage('sart', {
@@ -1459,12 +1607,11 @@ export function render(container, ctx) {
         break;
       }
       case 'trial': {
-        const task = payload.task || (local.behaviorRequest && local.behaviorRequest.task) || 'sart';
+        const task = taskKey(payload.task
+          || (local.behaviorRequest && local.behaviorRequest.task) || 'sart');
         const at = performance.now();
-        const delay = task === 'sart'
-          ? (payload.phase === 'practice' ? TRIAL_START_DELAY.sart_practice : TRIAL_START_DELAY.sart_main)
-          : 0;
-        // PVT 的 onset 是绝对时刻：当同一序列里两个 onset 都到达后，可用差值校准本地时钟
+        // PVT 的 onset 是绝对时刻：当同一序列里两个 onset 都到达后，可用差值校准本地时钟；
+        // SART 没有这项（刺激就是事件到达时刻）。**不再扣 SOA**——见 reactionTime 上方注释。
         let clockSkew = 0;
         if (task === 'pvt' && typeof payload.onset === 'number') {
           if (typeof local.previousOnset === 'number' && local.previousArrival) {
@@ -1480,7 +1627,8 @@ export function render(container, ctx) {
           digit: payload.digit ?? null,
           total: payload.total ?? null,
           onset: at,
-          delay: delay + Math.max(0, clockSkew),
+          delay: Math.max(0, clockSkew),    // 只有 PVT 的时钟校准项；SART 恒为 0
+          stimulus: true,                   // 本试次的刺激已经呈现（PVT 据此画红点/计时器）
           keyReady: true,
           responseWindow: Number(payload.response_window) || null,
           answer: null,
@@ -1491,10 +1639,13 @@ export function render(container, ctx) {
           index: local.trial.index + 1,
           total: payload.total,
           phaseLabel: payload.phase === 'practice' ? '练习' : '正式',
+          // PVT：画刺激（红点 + 毫秒计时器）；SART：画数字
+          stimulus: true,
           hint: task === 'sart'
             ? (payload.digit !== null ? '按空格作答（是否该按由服务端判定）' : '按空格作答')
-            : '刺激出现，尽快按空格',
+            : '光点已出现，尽快按空格',
         });
+        if (task === 'pvt') startStimulusTicker(local.trial);
         if (payload.phase === 'done') {
           local.trial = null;
           clearTrialWindow();
@@ -1666,12 +1817,36 @@ export function render(container, ctx) {
   // `started` 事件只在会话刚开始时推一次，页面在会话中途才打开时收不到，
   // 这时如果只用兜底清单就会丢掉每个阶段的引导说明——所以这里主动取一次
   // /api/config 的 phases（它来自后端 phases.as_list()，是同一份数据）。
+  /**
+   * 把 `/api/config` 的阶段引导字段**并进当前阶段表**，而不是替换整张表。
+   *
+   * 为什么：`/api/config` 给的是**完整协议**的 11 步，而短协议会话只有 9 步；
+   * 直接 `local.phaseOrder = phases` 会让短协议会话显示"第 5 / 11 步"（实测踩到）。
+   * 会话自己的阶段表来自 `GET /api/sessions/{uuid}` 的 `phases`（按协议档生成），优先级最高。
+   */
+  const applyGuidance = (rows) => {
+    local.guidance = list(rows);
+    const byKey = new Map(local.guidance.map((row) => [pick(row, 'key'), row]));
+    if (local.phaseOrderIsSession) {
+      local.phaseOrder = mergeGuidance(local.phaseOrder);
+    } else {
+      local.phaseOrder = local.guidance.slice();
+    }
+    refresh();
+  };
+  /** 用已加载的引导字段（若有）补齐给定阶段表的说明文案，**不改阶段集合**。 */
+  const mergeGuidance = (rows) => {
+    const byKey = new Map(list(local.guidance).map((row) => [pick(row, 'key'), row]));
+    return list(rows).map((phase) => {
+      const guide = byKey.get(pick(phase, 'key'));
+      return guide ? { ...phase, ...guide } : phase;
+    });
+  };
   const ensurePhaseGuidance = async () => {
     const seeded = list(pick(ctx.store.state.config, 'phases', []));
     const hasGuidance = seeded.length && pick(seeded[0], 'headline', null);
     if (hasGuidance) {
-      local.phaseOrder = seeded;
-      refresh();
+      applyGuidance(seeded);
       return;
     }
     try {
@@ -1680,8 +1855,7 @@ export function render(container, ctx) {
       const phases = list(pick(response.data, 'phases', []));
       if (!phases.length || !pick(phases[0], 'headline', null)) return;
       ctx.store.setState({ config: response.data });
-      local.phaseOrder = phases;
-      refresh();
+      applyGuidance(phases);
     } catch (error) {
       console.warn('[flow] 阶段引导加载失败，沿用兜底清单', error);
     }
@@ -1692,6 +1866,16 @@ export function render(container, ctx) {
     if (ctx.signal.aborted) return;
     const data = response.data || {};
     local.detail = data;                  // 「检测完成」卡要用 indicator_summary / runs(qc) / error
+    // 阶段表以**会话自己的协议档**为准（短协议 9 步）。`/api/config` 给的是完整协议 11 步，
+    // 直接用它会让短协议会话显示"第 5 / 11 步"（实测踩到）。
+    const sessionPhases = list(pick(data, 'phases', []));
+    if (sessionPhases.length) {
+      local.phaseOrderIsSession = true;
+      local.phaseOrder = mergeGuidance(sessionPhases);
+      local.protocol = pick(data, 'protocol', local.protocol);
+      local.protocolLabel = pick(data, 'protocol_label', local.protocolLabel);
+      refresh();
+    }
     const session = { ...data };
     if (data.session) Object.assign(session, data.session);
     session.uuid = uuid;

@@ -605,7 +605,7 @@ class SessionRuntime:
                                         nogo_trials=self.profile["sart_nogo_trials"],
                                         practice_trials=self.profile["sart_practice_trials"])
         self.sart_task = task
-        self.bus.publish("behavior_request", {"task": "sart", **task.sequence_payload()})
+        self.bus.publish("behavior_request", {**task.sequence_payload(), "task": "sart"})
         rng = random.Random(f"auto-sart-{self.uuid}")
         total = task.sequence.trials
         while True:
@@ -654,7 +654,10 @@ class SessionRuntime:
                                        duration_sec=self.profile["pvt_duration_sec"])
         self.pvt_task = task
         payload = task.sequence_payload()
-        self.bus.publish("behavior_request", {"task": "pvt", **payload})
+        # `task` 必须写在最后：`payload` 里也有一个 `task` 键（PvtTask 给的是 "pvt-b"），
+        # 放在后面写会把 "pvt" 覆盖成 "pvt-b"，前端按 `payload.task === 'pvt'` 分支就会走错，
+        # 于是 PVT 阶段一开始渲染出一张 **SART** 卡（实测：用户反馈"PVT-B 的刺激是什么？我没看到"）。
+        self.bus.publish("behavior_request", {**payload, "task": "pvt"})
         rng = random.Random(f"auto-pvt-{self.uuid}")
         previous = 0.0
         onsets = list(payload["onsets"])

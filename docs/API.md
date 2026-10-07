@@ -131,6 +131,13 @@ DELETE /api/devices/preview          → { "active": false, "stopped": true }
 
 > `GET /api/health` 里的 `overview` 也带同样四个字段（LSL 扫描结果有 3 秒缓存，health 不会被拖慢）。
 
+### `GET /api/sessions/{uuid}`
+
+会话详情。除 `session`（含 `protocol` / `protocol_label`）、`runs[]`、`alerts`、`artifacts`、
+`indicator_summary`、`runtime`（`alive` / `awaiting_input` / `source_kind`）之外，
+**`phases[]` 按本次会话的协议档给出**：短协议返回 9 步（不含 `training` / `model`）。
+前端据此渲染"第 x / y 步"，不能拿 `/api/config` 的完整 11 步去顶（否则短协议会话会显示错步数）。
+
 ### `GET /api/sessions` 与列表类响应的分页约定
 `{"items": [...], "total": N, "limit": L, "page": P}`；`page` 从 1 开始，`limit` 上限 200。
 会话、被试、被试的会话列表、`/api/scales`、`/api/sessions/{uuid}/artifacts` 全部遵守该信封，
