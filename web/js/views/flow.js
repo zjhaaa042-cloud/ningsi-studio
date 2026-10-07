@@ -627,8 +627,13 @@ export function render(container, ctx) {
       ]));
     }
 
-    /* 次要信息一律进折叠区（渐进披露）：要点、下一步、快速演示说明、会话与设备信息 */
+    /* 次要信息一律进折叠区（渐进披露）：要点、为什么需要这一步、下一步、快速演示说明、会话与设备信息 */
     const more = [];
+    // 「为什么需要这一步」放在要点之前：用户问过"会话流程中的操作都是必要的吗"，
+    // 页面必须自己能答（每个阶段在后端 phases.py 里有 why 字段）。
+    if (pick(phase, 'why', null)) {
+      more.push(el('p', { class: 'step__why', text: `为什么需要这一步：${pick(phase, 'why')}` }));
+    }
     if (details.length) {
       more.push(el('ul', { class: 'step__details' }, details.map((item) => el('li', { text: item }))));
     }
@@ -773,6 +778,9 @@ export function render(container, ctx) {
       }
       if (pick(picked, 'description', null)) {
         body.push(el('div', { class: 'phase-item__desc', text: pick(picked, 'description') }));
+      }
+      if (pick(picked, 'why', null)) {
+        body.push(el('div', { class: 'phase-item__why', text: `为什么需要这一步：${pick(picked, 'why')}` }));
       }
       for (const item of list(pick(picked, 'details', []))) {
         body.push(el('div', { class: 'phase-item__bullet', text: `· ${item}` }));

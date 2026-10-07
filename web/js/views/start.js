@@ -75,6 +75,16 @@ export async function render(container, ctx) {
   } catch (error) {
     sources = [];
   }
+  // 协议参数（阶段时长、SART/PVT 试次、量表题数）：用于第 3 步如实告诉操作者"要花多久、要动几次手"，
+  // 不在这里写死数字——口径来自 /api/config（引擎常量）。
+  let protocol = {};
+  try {
+    const response = await api.config();
+    protocol = pick(response.data, 'behavior', {}) || {};
+    protocol.phases = list(pick(response.data, 'phases', []));
+  } catch (error) {
+    protocol = {};
+  }
   if (ctx.signal.aborted) return;
 
   const real = sources.filter((item) => pick(item, 'real')
@@ -332,13 +342,39 @@ export async function render(container, ctx) {
     host2.append(field('本次备注（可留空）', labelInput, '只写进本地记录，便于以后查找'));
 
     const subject = subjects.find((item) => pick(item, 'public_id') === local.subject);
-    host2.append(card('这次检测会发生什么', el('ul', { class: 'wizard__plan' }, [
-      el('li', { text: '① 设备质检 → ② 睁眼/闭眼静息基线 → ③ 量表（SAS/SDS 各 20 题）' }),
-      el('li', { text: '④ SART 持续注意（看到数字按空格，看到 3 不要按）→ ⑤ PVT 警觉度（出现红点尽快按）' }),
-      el('li', { text: '⑥ 任务态监测 → ⑦ 神经反馈训练 → ⑧ 联合评估、模型与报告' }),
-      el('li', { text: local.scale === 1.0
-        ? '需要被测者配合的只有 ③④⑤；其余阶段保持安静坐好即可'
-        : '快速演示：③④⑤ 由服务端自动作答，不需要人操作' }),
+    // 如实算出"这次检测要花多久、要动几次手"（用户问过"会话流程中的操作都是必要的吗"）
+    const phases = list(protocol.phases);
+    const totalSec = phases.reduce((sum, item) => sum + (Number(pick(item, 'duration_sec', 0)) || 0), 0);
+    const interactive = phases.filter((item) => pick(item, 'interactive', false));
+    const sart = pick(protocol, 'sart', {}) || {};
+    const pvt = pick(protocol, 'pvt', {}) || {};
+    const scales = pick(protocol, 'scales', {}) || {};
+    const isi = list(pick(pvt, 'isi_sec', [1, 4]));
+    const isiMean = isi.length ? (Number(isi[0]) + Number(isi[isi.length - 1])) / 2 : 2.5;
+    const pvtTrials = Number(pick(pvt, 'duration_sec', 0))
+      ? Math.round(Number(pick(pvt, 'duration_sec', 0)) / isiMean) : null;
+    const scaleItems = (Number(pick(scales, 'items_per_scale', 20)) || 20)
+      * list(pick(scales, 'codes', ['SAS', 'SDS'])).length;
+    const burden = [];
+    if (totalSec) burden.push(`整场约 ${(totalSec / 60).toFixed(0)} 分钟`);
+    if (interactive.length) {
+      burden.push(`需要被测者动手的有 ${fmtInt(interactive.length)} 步：量表 ${fmtInt(scaleItems)} 题、`
+        + `SART ${fmtInt((Number(pick(sart, 'practice_trials', 0)) || 0) + (Number(pick(sart, 'trials', 0)) || 0))} 个试次、`
+        + `PVT ${pvtTrials ? `约 ${fmtInt(pvtTrials)} 次按键` : '3 分钟按键'}`);
+    }
+    if (phases.length) {
+      burden.push(`其余 ${fmtInt(phases.length - interactive.length)} 步全自动（坐好等待即可，不用点任何东西）`);
+    }
+    host2.append(card('这次检测会发生什么', el('div', { class: 'stack' }, [
+      burden.length ? el('p', { class: 'wizard__burden', text: burden.join('；') + '。' }) : null,
+      el('ul', { class: 'wizard__plan' }, [
+        el('li', { text: '① 设备质检 → ② 睁眼/闭眼静息基线 → ③ 量表（SAS/SDS 各 20 题）' }),
+        el('li', { text: '④ SART 持续注意（看到数字按空格，看到 3 不要按）→ ⑤ PVT 警觉度（出现红点尽快按）' }),
+        el('li', { text: '⑥ 任务态监测 → ⑦ 神经反馈训练 → ⑧ 联合评估、模型与报告' }),
+        el('li', { text: local.scale === 1.0
+          ? '需要被测者配合的只有 ③④⑤；其余阶段保持安静坐好即可'
+          : '快速演示：③④⑤ 由服务端自动作答，不需要人操作' }),
+      ]),
     ]), { sub: `被试 sub-${pick(subject, 'public_id', local.subject || '—')}`
       + `｜设备 ${local.device || '—'}｜${local.scale === 1.0 ? '真实节奏' : '快速演示'}` }));
     host2.append(el('p', { class: 'muted', text: '点「开始检测」后页面会自动切到被测者视图'

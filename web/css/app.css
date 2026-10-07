@@ -427,6 +427,16 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
    把新的横向步进条覆盖回"一行一个阶段"，白改一轮。
    下面只保留说明面板里仍在用的文字样式。 */
 .phase-item__desc { color: var(--text-3); font-size: 12px; margin-top: 2px; }
+/* 「为什么需要这一步 / 不做会丢什么」：左侧一道细线，和"要点"区分开 */
+.step__why,
+.phase-item__why {
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 2px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--line-strong);
+}
 .phase-item__bullet { color: var(--text-2); font-size: 12px; line-height: 1.8; }
 .phase-item__next { color: var(--text-3); font-size: 12px; margin-top: 2px; }
 
@@ -563,6 +573,17 @@ body.subject-mode .view { padding: 10px 16px 28px; }
 .wizard__foot { margin-top: 14px; }
 .wizard__sep { border: 0; border-top: 1px dashed var(--line); margin: 14px 0; }
 .wizard__ok { color: var(--text); font-weight: 600; margin: 0; }
+/* 「整场约 25 分钟；需要被测者动手的 3 步…」：把负担一次说清 */
+.wizard__burden {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--line-strong);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+}
 .wizard__warn { color: var(--text); font-weight: 600; margin: 0; }
 .wizard__plan { margin: 4px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
 /* 「脑电（EEG）— 本产品只用这一条」这类分组小标题：让"该选哪条流"一眼可辨 */

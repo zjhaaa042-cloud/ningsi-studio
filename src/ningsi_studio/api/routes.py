@@ -13,12 +13,17 @@ import logging
 from pathlib import Path
 
 from ningsi import config as engine_config
+from ningsi.behavior import pvt as pvt_module
+from ningsi.behavior import sart as sart_module
 
 from ningsi_studio import bootstrap
 from ningsi_studio.api import schemas
 from ningsi_studio.core import live_source, paired_ledger, phases as phase_module
 from ningsi_studio.core import signal_feed
-from ningsi_studio.core.runtime import SessionManager
+# 注意：**不要**写 `from ningsi_studio.core import runtime`——`core/__init__.py` 用
+# `__getattr__` 惰性导入 runtime，在包初始化过程中再走一次那条路径会无限递归
+# （实测 RecursionError，服务起不来）。直接导入子模块属性没有这个问题。
+from ningsi_studio.core.runtime import SART_TRIAL_WINDOW, SessionManager
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
 from ningsi_studio.domain import export as export_domain
@@ -242,6 +247,16 @@ def build_router(settings: Settings) -> Router:
                               for low, high, label, color in engine_config.HEATMAP_BANDS],
             "scale_boundary": engine_config.SCALE_BOUNDARY,
             "phases": phase_module.as_list(),
+            # 行为任务的协议参数：界面（向导的"本次检测要你做多少次"）不该自己写死试次数量，
+            # 口径统一从引擎常量取，改协议时两边不会漂移。
+            "behavior": {
+                "sart": {"practice_trials": sart_module.PRACTICE_TRIALS, "trials": sart_module.TRIALS,
+                         "nogo_trials": sart_module.NOGO_TRIALS, "nogo_digit": sart_module.NOGO_DIGIT,
+                         "window": dict(SART_TRIAL_WINDOW)},
+                "pvt": {"duration_sec": pvt_module.DURATION_SEC, "isi_sec": list(pvt_module.ISI_RANGE),
+                        "lapse_sec": pvt_module.LAPSE_SEC},
+                "scales": {"codes": ["SAS", "SDS"], "items_per_scale": 20},
+            },
             "privacy": {
                 "subject_id": "被试编号匿名且跨会话一致，姓名等直接身份信息不进入文件名、报告与数据库。",
                 "boundary": "结论仅用于研究与自我调节训练，不构成医疗诊断，不得用于处罚或自动上岗决策。",

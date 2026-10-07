@@ -1,7 +1,7 @@
 """会话阶段定义：顺序、中文名、进度权重、是否需交互，以及"这一步在干什么"。
 
 设计参考了参考工程（bsense-suite）的协议定义方式：每个步骤都同时给出
-**给被试看的动作指令**、**给操作者的细节**、**预计时长**和**怎么推进**
+给被试看的动作指令、给操作者的细节、预计时长和怎么推进
 （自动推进 / 需要被试作答 / 需要操作者确认）。会话流程页据此渲染
 "当前该做什么"面板，而不是只丢一个阶段名让人猜。
 """
@@ -30,6 +30,9 @@ class Phase:
     advance: str = ADVANCE_AUTO
     next_hint: str = ""                                          # 这一步之后会发生什么
     auto_note: str = ""                                          # 快速演示模式下会怎么跑
+    #: 「为什么需要这一步 / 不做会丢什么」——用户问过"会话流程中的操作都是必要的吗"，
+    #: 界面必须能自己回答，而不是靠作者口头解释。空字符串表示还没写（渲染时会隐藏该行）。
+    why: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -44,6 +47,7 @@ class Phase:
             "advance": self.advance,
             "next_hint": self.next_hint,
             "auto_note": self.auto_note,
+            "why": self.why,
         }
 
 
@@ -59,6 +63,7 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=24.0,
         next_hint="信号可用窗比例达标就进入静息基线采集",
         auto_note="质检由服务端自动完成，只需等待",
+        why="这段数据能不能用全靠这一步判定：报告里的「可用窗比例」与「质检是否达标」来自它；不达标时后面所有指标都会标注为需谨慎解释。",
     ),
     Phase(
         "baseline_open", "睁眼基线", 0.10, False,
@@ -72,6 +77,7 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=120.0,
         next_hint="紧接着换闭眼基线，两个基线各自独立统计",
         auto_note="由服务端自动推进，2 分钟内不要起身",
+        why="三个指标（专注/放松/负荷）都是相对你本人基线的变化量；没有基线就只有原始功率，无法跨人比较。",
     ),
     Phase(
         "baseline_closed", "闭眼基线", 0.10, False,
@@ -84,6 +90,7 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=120.0,
         next_hint="基线完成后开始填量表，需要你逐题作答",
         auto_note="由服务端自动推进",
+        why="闭眼静息是 α 活动的参照；与睁眼对比才能解释「放松度」（睁闭眼差异是这类指标最稳的一条证据）。",
     ),
     Phase(
         "scales", "量表填写", 0.06, True,
@@ -98,6 +105,7 @@ PHASES: tuple[Phase, ...] = (
         advance=ADVANCE_SUBJECT,
         next_hint="量表提交后开始持续注意任务（SART）",
         auto_note="快速演示模式：服务端自动生成确定性作答，无需手动点选",
+        why="联合评估的三类证据之一（主观量表）。不做也能出报告，但结论只剩脑电与行为两类，一致性判定会少一类证据。",
     ),
     Phase(
         "sart", "SART 持续注意", 0.20, True,
@@ -108,10 +116,11 @@ PHASES: tuple[Phase, ...] = (
             "正式 180 试次中有 20 个是 3（抑制反应）",
             "尽量又快又准；按键有反应时记录",
         ),
-        duration_sec=300.0,
+        duration_sec=420.0,
         advance=ADVANCE_SUBJECT,
         next_hint="SART 之后是 3 分钟警觉度任务（PVT）",
         auto_note="快速演示模式：服务端自动作答，练习与正式都不需要按键",
+        why="行为证据里的「持续注意 / 抑制控制」。不做则该维度没有行为支撑，只有脑电指标。",
     ),
     Phase(
         "pvt", "PVT-B 警觉度", 0.10, True,
@@ -126,6 +135,7 @@ PHASES: tuple[Phase, ...] = (
         advance=ADVANCE_SUBJECT,
         next_hint="警觉度结束后进入任务态监测（会推送实时波形）",
         auto_note="快速演示模式：服务端自动作答",
+        why="行为证据里的「警觉度 / 困倦」。SART 测的是抑制控制，PVT 测的是唤醒水平与慢反应，两者不能互相替代。",
     ),
     Phase(
         "monitor", "任务态监测", 0.14, False,
@@ -139,6 +149,7 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=70.0,
         next_hint="监测出基线水平后进入神经反馈训练",
         auto_note="由服务端自动推进；可在“实时监测”页看实时波形",
+        why="报告的三个指标与预警全部来自这一段的逐窗统计——这是测量主体，不能省。",
     ),
     Phase(
         "training", "神经反馈训练", 0.16, False,
@@ -152,6 +163,7 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=240.0,
         next_hint="训练结束后进入联合评估与模型训练",
         auto_note="由服务端自动推进；训练视图可看达标情况",
+        why="这是训练干预，不是测量：它的达标比例与首末段变化会写进报告，但不参与结论判定。只想做一次评估的话，这一步是可省的。",
     ),
     Phase(
         "assessment", "联合评估", 0.04, False,
@@ -164,15 +176,20 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=5.0,
         next_hint="评估后训练分类模型并生成报告",
         auto_note="由服务端自动完成",
+        why="把脑电、量表、行为三类证据按一致性合成结论；省掉它报告里就只剩各段原始结果，没有结论。",
     ),
     Phase(
         "model", "模型训练", 0.03, False,
         "六维频带特征 + 被试级 6:2:2 划分 + AUC",
-        headline="正在训练个体化分类模型",
-        details=("用本次会话的频带特征训练，产出模型文件与 AUC",),
+        # 2026-10-07 更正：原写「正在训练个体化分类模型 / 用本次会话的频带特征训练」，
+        # 与实现不符——runtime.py 调 train_and_save() 时**没有传本次会话的窗**，
+        # 训练数据是内置仿真被试（SyntheticEEG）。所以它既不个体化、也不使用本次数据。
+        headline="正在训练基线分类模型",
+        details=("用内置仿真被试训练基线模型（不使用本次会话数据），产出模型文件与 AUC",),
         duration_sec=5.0,
         next_hint="产出报告、热力图、趋势与模型文件",
         auto_note="由服务端自动完成",
+        why="产出一个可复现的基线分类模型（用内置仿真被试训练，与本次会话数据无关）；不影响结论，纯粹是方法与链路证据。",
     ),
     Phase(
         "report", "报告与产物", 0.03, False,
@@ -185,6 +202,7 @@ PHASES: tuple[Phase, ...] = (
         duration_sec=5.0,
         next_hint="会话结束",
         auto_note="由服务端自动完成",
+        why="交付物本身：Markdown / JSON / 热力图 / 趋势 / 模型文件与 sha256 清单。",
     ),
 )
 

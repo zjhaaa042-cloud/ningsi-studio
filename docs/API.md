@@ -46,7 +46,15 @@
 ### `GET /api/config`
 返回 `version`、`specs`、`window_sec`(4.0)、`step_sec`(2.0)、`welch`、`bands`、`total_band`、
 `indicators`、`score_gain`、`baseline_protocol`、`quality`、`alerts`、`assess`、`training`、
-`heatmap_bands`、`scale_boundary`、`phases`、`privacy`（隐私与结论边界原文）。
+`heatmap_bands`、`scale_boundary`、`phases`、`privacy`（隐私与结论边界原文），以及：
+
+- **`phases[]`**：11 个阶段定义。每个阶段除 `headline / details / duration_sec / advance / next_hint /
+  auto_note` 外，还有 **`why`**——「为什么需要这一步 / 不做会丢什么」，会话流程页直接显示它
+  （用户问过"会话流程中的操作都是必要的吗"，页面必须能自己回答）。
+- **`behavior`**：行为任务与量表的协议参数，避免界面自己写死数字：
+  `sart{practice_trials, trials, nogo_trials, nogo_digit, window{practice, main}}`、
+  `pvt{duration_sec, isi_sec, lapse_sec}`、`scales{codes, items_per_scale}`。
+  向导第 3 步据此算出"整场约 N 分钟、需要动手的是哪几步、各多少次"。
 
 ### `GET /api/devices?probe=1.0`
 ```json
