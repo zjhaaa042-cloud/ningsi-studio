@@ -23,12 +23,20 @@ const STEPS = [
   { key: 'run', title: '节奏与开始', hint: '多久、怎么跑' },
 ];
 
-const local = { step: 0, subject: null, device: '', scale: 1.0, mode: 'quick', label: '',
-                filter: '', previewBuilt: false, previewHost: null };
+const local = { step: 0, subject: null, device: '', scale: 1.0, mode: 'quick', protocol: 'full',
+                label: '', filter: '', previewBuilt: false, previewHost: null };
 
 const SCALE_CHOICES = [
-  { value: 1.0, title: '真实节奏', note: '约 25–30 分钟；量表、SART、PVT 都由被测者本人作答（正式检测用这个）' },
+  { value: 1.0, title: '真实节奏', note: '按真实时间跑；量表、SART、PVT 都由被测者本人作答（正式检测用这个）' },
   { value: 0.05, title: '快速演示', note: '约 2 分钟；量表与按键任务由服务端自动作答，只看流程与报告（演示/自测用）' },
+];
+
+// 协议档：完整（默认）与短协议。负担/时长由 /api/config 的 profiles 提供，这里只放标题与"省在哪"。
+const PROTOCOL_CHOICES = [
+  { value: 'full', title: '完整协议（默认）',
+    note: '11 步全跑：含神经反馈训练与模型训练；SART 180 试次、PVT 3 分钟' },
+  { value: 'short', title: '短协议',
+    note: '9 步：不跑训练与模型；SART 90 试次（No-Go 10）、PVT 2 分钟——行为指标精度下降，报告会标注' },
 ];
 
 const MODE_CHOICES = [
@@ -82,6 +90,9 @@ export async function render(container, ctx) {
     const response = await api.config();
     protocol = pick(response.data, 'behavior', {}) || {};
     protocol.phases = list(pick(response.data, 'phases', []));
+    // 协议档也必须带过来：第 3 步的档位卡与负担行都靠它
+    // （第一版漏了这一行，界面"看起来正常"但协议档根本没渲染——探针断言当时太弱没抓到）
+    protocol.profiles = list(pick(response.data, 'profiles', []));
   } catch (error) {
     protocol = {};
   }
@@ -328,6 +339,33 @@ export async function render(container, ctx) {
         () => { local.scale = item.value; paint(); }));
     }
     host2.append(scaleHost);
+    // 协议档：完整 / 短协议。阶段数、时长、行为任务试次数全部来自 /api/config 的 profiles，
+    // 界面只负责展示"省了哪几步、代价是什么"（不写死数字）。
+    const profiles = list(protocol.profiles);
+    const picked = profiles.find((item) => pick(item, 'key', '') === local.protocol) || profiles[0] || null;
+    if (profiles.length) {
+      host2.append(el('p', { class: 'muted', text: '选检测协议（决定跑几步、行为证据多细）' }));
+      const protocolHost = el('div', { class: 'choice-row' });
+      for (const item of profiles) {
+        const key = String(pick(item, 'key', ''));
+        const meta = [pick(item, 'summary', '')];
+        if (Number(pick(item, 'phase_count', 0))) meta.push(`${fmtInt(pick(item, 'phase_count'))} 步`);
+        if (Number(pick(item, 'total_sec', 0))) {
+          meta.push(`约 ${(Number(pick(item, 'total_sec')) / 60).toFixed(0)} 分钟`);
+        }
+        if (key === 'short' && Number(pick(item, 'saved_sec', 0))) {
+          meta.push(`比完整协议少 ${(Number(pick(item, 'saved_sec')) / 60).toFixed(1)} 分钟`);
+        }
+        const fallback = PROTOCOL_CHOICES.find((row) => row.value === key) || {};
+        protocolHost.append(choiceCard(pick(item, 'label', fallback.title || key),
+          meta.filter(Boolean).join('｜') || fallback.note || '', local.protocol === key,
+          () => { local.protocol = key; paint(); }));
+      }
+      host2.append(protocolHost);
+      if (pick(picked, 'caveat', null)) {
+        host2.append(el('p', { class: 'wizard__warn', text: pick(picked, 'caveat') }));
+      }
+    }
     host2.append(el('p', { class: 'muted', text: '选训练时长' }));
     const modeHost = el('div', { class: 'choice-row' });
     for (const item of MODE_CHOICES) {
@@ -335,6 +373,10 @@ export async function render(container, ctx) {
         () => { local.mode = item.value; paint(); }));
     }
     host2.append(modeHost);
+    if (local.protocol === 'short') {
+      // 短协议不跑训练：训练时长这个选项就没意义了，如实说明而不是让人选了没效果
+      host2.append(el('p', { class: 'muted', text: '（短协议不跑神经反馈训练，上面的训练时长不生效）' }));
+    }
     const labelInput = el('input', {
       id: 'wizard-session-label', type: 'text', placeholder: '例如：第一次检测', value: local.label,
     });
@@ -342,28 +384,44 @@ export async function render(container, ctx) {
     host2.append(field('本次备注（可留空）', labelInput, '只写进本地记录，便于以后查找'));
 
     const subject = subjects.find((item) => pick(item, 'public_id') === local.subject);
-    // 如实算出"这次检测要花多久、要动几次手"（用户问过"会话流程中的操作都是必要的吗"）
-    const phases = list(protocol.phases);
-    const totalSec = phases.reduce((sum, item) => sum + (Number(pick(item, 'duration_sec', 0)) || 0), 0);
+    // 如实算出"这次检测要花多久、要动几次手"——**按当前选的协议档**算
+    // （用户问过"会话流程中的操作都是必要的吗"；短协议的试次数与时长都不同）
+    const allPhases = list(protocol.phases);
+    const activeKeys = list(pick(picked, 'phases', []));
+    const phases = activeKeys.length
+      ? allPhases.filter((item) => activeKeys.includes(pick(item, 'key', '')))
+      : allPhases;
+    const totalSec = Number(pick(picked, 'total_sec', 0))
+      || phases.reduce((sum, item) => sum + (Number(pick(item, 'duration_sec', 0)) || 0), 0);
     const interactive = phases.filter((item) => pick(item, 'interactive', false));
-    const sart = pick(protocol, 'sart', {}) || {};
     const pvt = pick(protocol, 'pvt', {}) || {};
     const scales = pick(protocol, 'scales', {}) || {};
     const isi = list(pick(pvt, 'isi_sec', [1, 4]));
     const isiMean = isi.length ? (Number(isi[0]) + Number(isi[isi.length - 1])) / 2 : 2.5;
-    const pvtTrials = Number(pick(pvt, 'duration_sec', 0))
-      ? Math.round(Number(pick(pvt, 'duration_sec', 0)) / isiMean) : null;
+    const pvtSec = Number(pick(picked, 'pvt_duration_sec', 0))
+      || Number(pick(pvt, 'duration_sec', 0));
+    const pvtTrials = pvtSec ? Math.round(pvtSec / isiMean) : null;
+    const sartTotal = (Number(pick(picked, 'sart_practice_trials', 0)) || 0)
+      + (Number(pick(picked, 'sart_trials', 0)) || 0);
     const scaleItems = (Number(pick(scales, 'items_per_scale', 20)) || 20)
       * list(pick(scales, 'codes', ['SAS', 'SDS'])).length;
+    const dropped = list(pick(picked, 'dropped_phases', []));
+    const droppedLabels = dropped.map((key) => {
+      const row = allPhases.find((item) => pick(item, 'key') === key);
+      return row ? pick(row, 'label', key) : key;
+    });
     const burden = [];
     if (totalSec) burden.push(`整场约 ${(totalSec / 60).toFixed(0)} 分钟`);
     if (interactive.length) {
       burden.push(`需要被测者动手的有 ${fmtInt(interactive.length)} 步：量表 ${fmtInt(scaleItems)} 题、`
-        + `SART ${fmtInt((Number(pick(sart, 'practice_trials', 0)) || 0) + (Number(pick(sart, 'trials', 0)) || 0))} 个试次、`
-        + `PVT ${pvtTrials ? `约 ${fmtInt(pvtTrials)} 次按键` : '3 分钟按键'}`);
+        + `SART ${fmtInt(sartTotal)} 个试次（No-Go ${fmtInt(pick(picked, 'sart_nogo_trials', 0) || 0)} 个）、`
+        + `PVT ${pvtTrials ? `约 ${fmtInt(pvtTrials)} 次按键` : '按键'}`);
     }
     if (phases.length) {
       burden.push(`其余 ${fmtInt(phases.length - interactive.length)} 步全自动（坐好等待即可，不用点任何东西）`);
+    }
+    if (droppedLabels.length) {
+      burden.push(`本次不跑：${droppedLabels.join('、')}`);
     }
     host2.append(card('这次检测会发生什么', el('div', { class: 'stack' }, [
       burden.length ? el('p', { class: 'wizard__burden', text: burden.join('；') + '。' }) : null,
@@ -398,6 +456,7 @@ export async function render(container, ctx) {
       device: local.device || null,
       time_scale: local.scale,
       training_mode: local.mode,
+      protocol: local.protocol,
       label: local.label.trim() || null,
       create_subject: false,
     };

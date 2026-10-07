@@ -202,6 +202,23 @@ DELETE /api/devices/preview          → { "active": false, "stopped": true }
 不再有"真实设备打不开就降级为仿真源"的静默替换：真实源不可用时会话启动失败并写明
 `无信号：数据源 <device> 不可用（…）`。
 
+**`protocol` 取值规则（2026-10-07 新增：短协议）**：
+
+| `protocol` | 行为 |
+|---|---|
+| 省略 / `""` / `full` | **完整协议（默认）**：11 个阶段；SART 12 练习 + 180 正式（20 No-Go）、PVT 180 秒 |
+| `short` | **短协议**：9 个阶段（**不含 `training` 与 `model`**）；SART 6 + 90（10 No-Go）、PVT 120 秒 |
+| 其它任意字符串 | `422 validation_failed`（**绝不静默当成短协议**） |
+
+短协议的代价必须留痕：会话详情与建会话响应都带 `protocol` / `protocol_label`，
+`GET /api/sessions/{uuid}` 的 `runs[]` 里不会出现 `training` / `model`，
+报告 `report_markdown` 表头会写 `- 检测协议：短协议（本次未跑：神经反馈训练、模型训练）`
+与一行 `- ⚠ 协议差异提醒：…`，`report.extras` 里带 `protocol` / `protocol_label` /
+`protocol_note` / `skipped_phases`。**两个协议的结果不应横向比较**（No-Go 数量不同）。
+
+`GET /api/config` 的 `profiles[]` 给出两个档的 `phase_count` / `total_sec`（按实际行为任务秒数算，
+不是阶段名义值）/ `saved_sec` / `dropped_phases` / `caveat`，界面据此显示负担，不写死数字。
+
 响应 `201`：
 ```json
 { "session": { "uuid": "<32位>", "participant": "p01", "subject_id": 1, "label": "第一次训练",

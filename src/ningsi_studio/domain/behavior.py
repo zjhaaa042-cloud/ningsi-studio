@@ -28,10 +28,17 @@ class SartTask:
     responded: list = field(default_factory=list)
     rts: list = field(default_factory=list)
     events: list = field(default_factory=list)
+    # 协议档可覆盖试次数（短协议：90 正式 / 10 No-Go / 6 练习）；不传就是完整协议的默认值。
+    trials: int | None = None
+    nogo_trials: int | None = None
+    practice_trials: int | None = None
 
     def __post_init__(self) -> None:
         if self.sequence is None:
-            self.sequence = sart_module.build_sequence(self.participant, self.session, self.run)
+            self.sequence = sart_module.build_sequence(
+                self.participant, self.session, self.run,
+                trials=self.trials, nogo_trials=self.nogo_trials,
+                practice_trials=self.practice_trials)
 
     # ------------------------------------------------------------------ 序列
     def sequence_payload(self) -> dict:
@@ -45,7 +52,10 @@ class SartTask:
             "seed": self.sequence.seed,
             "digits": list(self.sequence.digits),
             "practice": list(self.sequence.practice),
-            "instruction": "看到 1–9 按空格；看到数字 3 不要按。练习 12 试次后进入 180 个正式试次。",
+            # 试次数写进指导语（短协议会变，不能写死 12/180）
+            "instruction": ("看到 1–9 按空格；看到数字 3 不要按。"
+                            f"练习 {len(self.sequence.practice)} 试次后进入 "
+                            f"{self.sequence.trials} 个正式试次。"),
         }
 
     def next_trial(self) -> dict:

@@ -34,6 +34,20 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn) -> None:
+    """幂等列迁移。
+
+    `schema.sql` 用 `CREATE TABLE IF NOT EXISTS`，所以**给已有库加列必须显式 ALTER**，
+    否则老库（用户已经存了几百条会话）会缺列、查询直接报 no such column。
+    目前只有一条：
+    - `sessions.protocol`（'full' | 'short'）：短协议（去掉训练与模型、SART/PVT 减半）需要按会话记住，
+      运行线程、报告与界面都要读它。
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "protocol" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN protocol TEXT NOT NULL DEFAULT 'full'")
+
+
 def initialize(path) -> Path:
     """建库建表（幂等），返回数据库路径。"""
     target = Path(path)
@@ -42,6 +56,7 @@ def initialize(path) -> Path:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
+        _migrate(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
             (SCHEMA_VERSION, utcnow()),

@@ -210,18 +210,75 @@ PHASE_KEYS = tuple(phase.key for phase in PHASES)
 PHASE_BY_KEY = {phase.key: phase for phase in PHASES}
 
 
-def phase_index(key: str) -> int:
+# ---------------------------------------------------------------- 协议档（profile）
+#: 完整协议：11 步，SART 180 试次（20 个 No-Go），PVT 180 秒。
+PROFILE_FULL = "full"
+#: 短协议（2026-10-07 用户选定的方案 B）：去掉「神经反馈训练」与「模型训练」两个**非测量**阶段，
+#: 并把行为证据减半（SART 180→90、No-Go 20→10；PVT 180→120 秒）。
+#: 代价必须写清：No-Go 只有 10 个，抑制控制/漏报率的估计精度下降；报告与界面都要标注"短协议"。
+PROFILE_SHORT = "short"
+
+PROFILES: dict[str, dict] = {
+    PROFILE_FULL: {
+        "key": PROFILE_FULL,
+        "label": "完整协议",
+        "summary": "11 步全跑：含神经反馈训练与模型训练，SART 180 试次、PVT 3 分钟",
+        "phases": tuple(phase.key for phase in PHASES),
+        "sart_trials": 180,
+        "sart_nogo_trials": 20,
+        "sart_practice_trials": 12,
+        "pvt_duration_sec": 180.0,
+        # 行为任务的实际秒数（SART 按固定 SOA 算：练习 1.6 s + 正式 2.2 s 每试次）。
+        # 与 runtime.SART_TRIAL_WINDOW 必须一致——有单测守着（test_phases_profiles）。
+        "sart_sec_estimate": 12 * 1.6 + 180 * 2.2,
+        "caveat": "",
+    },
+    PROFILE_SHORT: {
+        "key": PROFILE_SHORT,
+        "label": "短协议",
+        "summary": "9 步：去掉训练与模型；SART 90 试次（10 个 No-Go）、PVT 2 分钟",
+        "phases": tuple(key for key in PHASE_KEYS if key not in ("training", "model")),
+        "sart_trials": 90,
+        "sart_nogo_trials": 10,
+        "sart_practice_trials": 6,
+        "pvt_duration_sec": 120.0,
+        "sart_sec_estimate": 6 * 1.6 + 90 * 2.2,
+        "caveat": ("短协议：未跑神经反馈训练与模型训练，SART 减半（180→90 试次、No-Go 20→10）、"
+                   "PVT 缩短（180→120 秒）。行为指标（漏报率、抑制控制、慢反应率）的估计精度低于完整协议，"
+                   "结论需谨慎解释；需要与完整协议结果横向比较时请用同一协议。"),
+    },
+}
+
+
+def normalize_profile(name: object) -> str:
+    """把外部传入的协议名归一；未知值一律回落到完整协议（默认档，绝不静默变成短协议）。"""
+    key = str(name or "").strip().lower()
+    return key if key in PROFILES else PROFILE_FULL
+
+
+def profile_dict(name: object = PROFILE_FULL) -> dict:
+    return dict(PROFILES[normalize_profile(name)])
+
+
+def phases_for(name: object = PROFILE_FULL) -> tuple:
+    keys = PROFILES[normalize_profile(name)]["phases"]
+    return tuple(PHASE_BY_KEY[key] for key in keys)
+
+
+def phase_index(key: str, profile: object = PROFILE_FULL) -> int:
     try:
-        return PHASE_KEYS.index(key)
+        return PROFILES[normalize_profile(profile)]["phases"].index(key)
     except ValueError:
         return -1
 
 
-def progress_for(key: str, within: float = 0.0) -> float:
-    """把"当前阶段 + 阶段内完成度"折算成 0–1 总进度。"""
-    total = sum(phase.weight for phase in PHASES) or 1.0
+def progress_for(key: str, within: float = 0.0, profile: object = PROFILE_FULL) -> float:
+    """把"当前阶段 + 阶段内完成度"折算成 0–1 总进度（按该协议的阶段集合与权重）。"""
+    keys = PROFILES[normalize_profile(profile)]["phases"]
+    active = [PHASE_BY_KEY[item] for item in keys]
+    total = sum(phase.weight for phase in active) or 1.0
     done = 0.0
-    for phase in PHASES:
+    for phase in active:
         if phase.key == key:
             done += phase.weight * max(0.0, min(1.0, within))
             break
@@ -229,5 +286,50 @@ def progress_for(key: str, within: float = 0.0) -> float:
     return round(done / total, 4)
 
 
-def as_list() -> list[dict]:
-    return [phase.as_dict() for phase in PHASES]
+def as_list(profile: object = PROFILE_FULL) -> list[dict]:
+    """按协议档给出阶段定义；**时长按档案校正**（SART/PVT 在短协议下会变）。
+
+    界面用这个时长显示"预计"，所以不能直接回 phases.py 里的名义值——短协议下
+    SART 名义 420s 而实际 ~208s，直接用名义值会少报节省。
+    """
+    item = PROFILES[normalize_profile(profile)]
+    rows = []
+    for phase in phases_for(profile):
+        row = phase.as_dict()
+        if phase.key == "sart":
+            row["duration_sec"] = round(float(item.get("sart_sec_estimate") or row["duration_sec"]), 1)
+            row["details"] = list(row["details"]) + [
+                f"本次协议：{item['sart_practice_trials']} 练习 + {item['sart_trials']} 正式试次"
+                f"（其中 {item['sart_nogo_trials']} 个 No-Go）"
+            ]
+        elif phase.key == "pvt":
+            row["duration_sec"] = float(item["pvt_duration_sec"])
+        rows.append(row)
+    return rows
+
+
+def profiles_as_list() -> list[dict]:
+    """给 `GET /api/config`：界面（向导）据此展示协议档与负担。"""
+    rows = []
+    full = PROFILES[PROFILE_FULL]
+    for key in (PROFILE_FULL, PROFILE_SHORT):
+        item = PROFILES[key]
+        active = [PHASE_BY_KEY[name] for name in item["phases"]]
+        # 总时长按**实际**行为任务秒数算：SART 的阶段名义时长（420s）是完整协议的值，
+        # 短协议下会缩到 ~208s，直接用名义值会少报节省。
+        total = sum(phase.duration_sec for phase in active if phase.key != "sart")
+        total += float(item.get("sart_sec_estimate") or 0.0)
+        total -= float(item["pvt_duration_sec"])          # phases 里 PVT 名义 180s，按档案值算
+        total += float(item["pvt_duration_sec"])
+        rows.append({
+            **{name: value for name, value in item.items() if name != "phases"},
+            "phases": list(item["phases"]),
+            "phase_count": len(item["phases"]),
+            "total_sec": round(total, 1),
+            "dropped_phases": [name for name in PHASE_KEYS if name not in item["phases"]],
+            "saved_sec": round(float(full.get("sart_sec_estimate", 0)) + full["pvt_duration_sec"]
+                               + sum(PHASE_BY_KEY[name].duration_sec
+                                     for name in full["phases"] if name not in item["phases"])
+                               - float(item.get("sart_sec_estimate", 0)) - item["pvt_duration_sec"], 1),
+        })
+    return rows

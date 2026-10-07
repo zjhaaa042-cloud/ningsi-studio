@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     source          TEXT,                          -- 实际数据源：sim-bsense / lsl:<name>（LSL 未就绪而降级时会回写为 sim-bsense）
     time_scale      REAL NOT NULL DEFAULT 1.0,
     training_mode   TEXT NOT NULL DEFAULT 'quick',
+    protocol        TEXT NOT NULL DEFAULT 'full',  -- full（完整 11 步）/ short（短协议：去掉训练与模型，SART/PVT 减半）
     status          TEXT NOT NULL DEFAULT 'queued',-- queued|running|done|failed|cancelled
     phase           TEXT NOT NULL DEFAULT 'queued',
     progress        REAL NOT NULL DEFAULT 0.0,

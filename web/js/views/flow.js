@@ -485,6 +485,9 @@ export function render(container, ctx) {
     const quality = qualityStats();
     const scales = [...local.scaleResults.values()];
     const reason = pick(session, 'error', null) || pick(local.detail, 'error', null);
+    const protocolLabel = local.protocolLabel || pick(session, 'protocol_label', null)
+      || pick(local.detail, 'protocol_label', null);
+    const protocolNote = local.protocolNote || pick(local.detail, 'protocol_note', null);
 
     const metric = (label, value, note) => el('div', { class: 'done__metric' }, [
       el('span', { class: 'done__metric-label', text: label }),
@@ -506,6 +509,13 @@ export function render(container, ctx) {
     if (scales.length) {
       body.push(el('p', { class: 'muted', text: '量表：' + scales.map((row) => `${row.code || DASH} 标准分 ${fmtInt(row.standard_score)}`
         + `（${row.level || DASH}）`).join('｜') }));
+    }
+    if (protocolLabel && protocolLabel !== '完整协议') {
+      // 短协议的结果不能与完整协议直接比较：这一行必须在结果页出现，而不是只写在报告里
+      body.push(el('p', { class: 'wizard__warn', text: `本次为「${protocolLabel}」：`
+        + (protocolNote || '与完整协议的阶段/试次数不同，横向比较请用同一协议。') }));
+    } else if (protocolLabel) {
+      body.push(el('p', { class: 'muted', text: `检测协议：${protocolLabel}` }));
     }
     body.push(el('p', { class: 'muted', text: '结论、图表、证据与边界声明都在「评估报告」里；'
       + '原始逐窗数据与产物可整包下载。' }));
@@ -647,6 +657,12 @@ export function render(container, ctx) {
     }
     // 时间倍率 / 采样率属于调试细节，不在这里显示（口径与设备参数仍可在报告的"运行环境"里查）
     more.push(el('p', { class: 'muted', text: `会话状态：${statusText(pick(session, 'status', null))}｜设备：${pick(session, 'device', DASH)}` }));
+    // 协议档：短协议要让操作者看到"这次少跑了两步、行为证据减半"
+    const protocolLabel = local.protocolLabel || pick(session, 'protocol_label', null);
+    if (protocolLabel) {
+      more.push(el('p', { class: 'muted', text: `检测协议：${protocolLabel}`
+        + (local.protocolNote ? `｜${local.protocolNote}` : '') }));
+    }
     if (local.auto) {
       more.push(el('p', { class: 'muted', text: '本次为快速演示模式（time_scale < 0.2）：量表与行为任务由服务端生成确定性作答。' }));
     }
@@ -1330,11 +1346,17 @@ export function render(container, ctx) {
         local.autoKnown = true;
         local.running = true;
         local.phaseOrder = list(payload.phases).length ? list(payload.phases) : PHASE_FALLBACK;
+        // 协议档：界面要能显示"本次跑的是短协议（少跑哪两步、行为证据减半）"
+        local.protocol = payload.protocol || local.protocol;
+        local.protocolLabel = payload.protocol_label || local.protocolLabel;
+        local.protocolNote = payload.protocol_note || local.protocolNote;
         const session = { ...(ctx.store.state.currentSession || {}) };
         session.uuid = uuid;
         session.participant = payload.participant ?? session.participant;
         session.device = payload.device ?? session.device;
         session.time_scale = payload.time_scale ?? session.time_scale;
+        session.protocol = local.protocol;
+        session.protocol_label = local.protocolLabel;
         session.status = 'running';
         ctx.store.setState({
           currentSession: session,

@@ -86,6 +86,11 @@ class SessionRuntime:
         # 由 _load 填充
         self.session = None
         self.subject = None
+        # 协议档（full / short）：_load() 从会话行读出后覆盖这两项
+        self.protocol = phase_module.PROFILE_FULL
+        self.profile = phase_module.profile_dict(self.protocol)
+        self.profile_phase_keys = self.profile["phases"]
+        self.skipped_phases: list[str] = []
         self.db_path = Path(self.settings.db_path)
         self.source = None
         self.engine = None
@@ -203,6 +208,12 @@ class SessionRuntime:
             if self.session is None:
                 raise RuntimeError(f"会话不存在：{self.uuid}")
             self.subject = repo.get_subject_by_pk(conn, self.session["subject_id"])
+        # 协议档：老库的行可能没有 protocol 列的值（迁移补成 'full'），未知值一律回落完整协议。
+        self.protocol = phase_module.normalize_profile(self.session.get("protocol")
+                                                      if isinstance(self.session, dict)
+                                                      else self.session["protocol"])
+        self.profile = phase_module.profile_dict(self.protocol)
+        self.profile_phase_keys = self.profile["phases"]
         device = str(self.session["device"] or "").strip()
         if not device:
             # 历史记录里可能是"缺省仿真"时代建的会话：不再默默补成仿真源（产品规则：
@@ -262,9 +273,9 @@ class SessionRuntime:
         with store.connect(self.db_path) as conn:
             run_id = repo.start_run(conn, self.session["id"], key)
             repo.update_session(conn, self.uuid, phase=key,
-                                progress=phase_module.progress_for(key, 0.0))
+                                progress=phase_module.progress_for(key, 0.0, self.protocol))
         self.bus.publish("phase", {"key": key, "label": label, "state": "running",
-                                   "progress": phase_module.progress_for(key, 0.0)})
+                                   "progress": phase_module.progress_for(key, 0.0, self.protocol)})
         context = {"run_id": run_id, "key": key}
         try:
             yield context
@@ -277,7 +288,21 @@ class SessionRuntime:
         else:
             self._close_run(run_id, "done", started, None)
             self.bus.publish("phase", {"key": key, "label": label, "state": "done",
-                                       "progress": phase_module.progress_for(key, 1.0)})
+                                       "progress": phase_module.progress_for(key, 1.0, self.protocol)})
+
+    def _note_skipped_phase(self, key: str) -> None:
+        """短协议下被跳过的阶段：记一条（去重）并如实广播，界面/报告据此标注"未跑"。"""
+        if key in self.skipped_phases:
+            return
+        self.skipped_phases.append(key)
+        label = phase_module.PHASE_BY_KEY[key].label if key in phase_module.PHASE_BY_KEY else key
+        self.bus.publish("notice", {
+            "level": "info",
+            "message": f"短协议：本次不跑「{label}」（"
+                       + ("它是训练干预、不参与结论判定" if key == "training"
+                          else "它用内置仿真被试训练、与本次会话数据无关")
+                       + "）。",
+        })
 
     def _close_run(self, run_id, status: str, started: float, error) -> None:
         """收尾一个阶段：只更新状态/耗时，**保留**阶段过程中已写入的中间结果。
@@ -296,7 +321,7 @@ class SessionRuntime:
             LOGGER.warning("写 runs 失败：%s", exc)
 
     def _progress(self, key: str, within: float, **extra) -> None:
-        payload = {"key": key, "progress": phase_module.progress_for(key, within), **extra}
+        payload = {"key": key, "progress": phase_module.progress_for(key, within, self.protocol), **extra}
         self.bus.publish("progress", payload)
         try:
             with store.connect(self.db_path) as conn:
@@ -335,6 +360,8 @@ class SessionRuntime:
         # 快速演示模式：时间倍率小于 0.2 即认为"无人值守演示"，交互阶段由服务端生成
         # 确定性作答。判断只看归整后的 self.scale，不解析原始字段，避免两套开关打架。
         auto = time_scale < 0.2
+        # 协议档（full / short）：短协议少跑两个非测量阶段、行为证据减半。
+        # 注意 self.protocol 在 _load() 里从会话行读出（默认 full），所以这里只做展示与分支。
         self.bus.publish("started", {
             "uuid": self.uuid,
             "participant": self.subject["public_id"],
@@ -343,7 +370,10 @@ class SessionRuntime:
             "source_note": self.source.note,
             "time_scale": time_scale,
             "auto": auto,
-            "phases": phase_module.as_list(),
+            "protocol": self.protocol,
+            "protocol_label": phase_module.PROFILES[self.protocol]["label"],
+            "protocol_note": phase_module.PROFILES[self.protocol]["caveat"],
+            "phases": phase_module.as_list(self.protocol),
             "engine_versions": {"spectrum": config.SPECTRUM_SPEC,
                                 "indicator": config.INDICATOR_SPEC,
                                 "baseline": config.BASELINE_SPEC,
@@ -416,10 +446,15 @@ class SessionRuntime:
             self._merge_run_payload(context["run_id"], {"quality": monitor["quality"]})
             self.bus.publish("monitor", {"summary": monitor["summary"], "quality": monitor["quality"]})
 
-        # 7) 神经反馈训练
-        with self._phase("training") as context:
-            training_result = self._run_training(baseline, auto)
-            self._merge_run_payload(context["run_id"], {"training": training_result})
+        # 7) 神经反馈训练（短协议不跑：它是训练干预、不是测量）
+        training_result = None
+        if "training" in self.profile_phase_keys:
+            with self._phase("training") as context:
+                training_result = self._run_training(baseline, auto)
+                self._merge_run_payload(context["run_id"], {"training": training_result})
+        else:
+            self.training_skipped = True
+            self._note_skipped_phase("training")
 
         # 8) 联合评估
         with self._phase("assessment") as context:
@@ -429,13 +464,18 @@ class SessionRuntime:
             self._merge_run_payload(context["run_id"], assessment_result.as_dict())
             self.bus.publish("assessment", assessment_result.as_dict())
 
-        # 9) 模型训练
-        with self._phase("model") as context:
-            model_metrics = model_training.train_and_save(
-                self.runs_root / "models" / "classifier.json")
-            self.artifacts["model"] = Path(model_metrics["model_path"])
-            self._merge_run_payload(context["run_id"], model_metrics)
-            self.bus.publish("model", model_metrics)
+        # 9) 模型训练（短协议不跑：它是内置仿真被试上的基线产物，与本次会话数据无关）
+        model_metrics = None
+        if "model" in self.profile_phase_keys:
+            with self._phase("model") as context:
+                model_metrics = model_training.train_and_save(
+                    self.runs_root / "models" / "classifier.json")
+                self.artifacts["model"] = Path(model_metrics["model_path"])
+                self._merge_run_payload(context["run_id"], model_metrics)
+                self.bus.publish("model", model_metrics)
+        else:
+            self.model_skipped = True
+            self._note_skipped_phase("model")
 
         # 10) 报告与产物
         with self._phase("report") as context:
@@ -446,6 +486,10 @@ class SessionRuntime:
 
         self.summary = {
             "participant": self.subject["public_id"],
+            "protocol": self.protocol,
+            "protocol_label": phase_module.PROFILES[self.protocol]["label"],
+            "protocol_note": phase_module.PROFILES[self.protocol]["caveat"],
+            "skipped_phases": list(self.skipped_phases),
             "quality": monitor["quality"],
             "indicators": monitor["summary"],
             "assessment": assessment_result.as_dict(),
@@ -556,7 +600,10 @@ class SessionRuntime:
         return {"responded": False, "rt": None, "__elapsed": time.monotonic() - started}
 
     def _run_sart(self, auto: bool):
-        task = behavior_domain.SartTask(self.subject["public_id"], "01", "001")
+        task = behavior_domain.SartTask(self.subject["public_id"], "01", "001",
+                                        trials=self.profile["sart_trials"],
+                                        nogo_trials=self.profile["sart_nogo_trials"],
+                                        practice_trials=self.profile["sart_practice_trials"])
         self.sart_task = task
         self.bus.publish("behavior_request", {"task": "sart", **task.sequence_payload()})
         rng = random.Random(f"auto-sart-{self.uuid}")
@@ -603,7 +650,8 @@ class SessionRuntime:
         return (responded, round(rng.uniform(0.26, 0.62), 3) if responded else None)
 
     def _run_pvt(self, auto: bool):
-        task = behavior_domain.PvtTask(seed=abs(hash(self.uuid + "pvt")) % 100000)
+        task = behavior_domain.PvtTask(seed=abs(hash(self.uuid + "pvt")) % 100000,
+                                       duration_sec=self.profile["pvt_duration_sec"])
         self.pvt_task = task
         payload = task.sequence_payload()
         self.bus.publish("behavior_request", {"task": "pvt", **payload})
@@ -738,6 +786,13 @@ class SessionRuntime:
                 # 仿真源没有这一步，取到 None 就不写。
                 "signal_conditioning": self._conditioning_record(),
                 "time_scale": self.scale,
+                # 协议档：短协议必须让报告读者看到"行为证据减半、未跑训练与模型"
+                "protocol": self.protocol,
+                "protocol_label": phase_module.PROFILES[self.protocol]["label"],
+                "protocol_note": phase_module.PROFILES[self.protocol]["caveat"],
+                "skipped_phases": [phase_module.PHASE_BY_KEY[key].label
+                                   for key in self.skipped_phases
+                                   if key in phase_module.PHASE_BY_KEY],
                 "alerts": self.engine.fired_alerts,
                 "baseline_protocol": dict(config.BASELINE_PROTOCOL),
                 "baseline_reference": config.BASELINE_PROTOCOL["task_reference"],

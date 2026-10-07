@@ -105,6 +105,11 @@ def session_public(row, *, extra: dict | None = None) -> dict:
         "source": row["source"],
         "time_scale": row["time_scale"],
         "training_mode": row["training_mode"],
+        # 协议档（full / short）：老库的行在迁移里补成 'full'；未知值按完整协议展示
+        "protocol": phase_module.normalize_profile(
+            row["protocol"] if "protocol" in row.keys() else None),
+        "protocol_label": phase_module.PROFILES[
+            phase_module.normalize_profile(row["protocol"] if "protocol" in row.keys() else None)]["label"],
         "status": row["status"],
         "phase": row["phase"],
         "phase_label": phase_module.PHASE_BY_KEY.get(row["phase"]).label
@@ -247,6 +252,8 @@ def build_router(settings: Settings) -> Router:
                               for low, high, label, color in engine_config.HEATMAP_BANDS],
             "scale_boundary": engine_config.SCALE_BOUNDARY,
             "phases": phase_module.as_list(),
+            # 协议档：向导据此展示"完整 / 短协议"与各自负担（阶段数、时长、行为任务试次数）
+            "profiles": phase_module.profiles_as_list(),
             # 行为任务的协议参数：界面（向导的"本次检测要你做多少次"）不该自己写死试次数量，
             # 口径统一从引擎常量取，改协议时两边不会漂移。
             "behavior": {
@@ -499,6 +506,14 @@ def build_router(settings: Settings) -> Router:
         if training_mode not in engine_config.TRAINING:
             raise ValidationError(f"训练模式必须是 {sorted(engine_config.TRAINING)} 之一",
                                   detail=training_mode)
+        # 协议档：full（11 步，默认）/ short（9 步：去掉训练与模型，SART/PVT 减半）。
+        # 未知值一律回落完整协议——**绝不把拼错的档名当成短协议**。
+        protocol_raw = schemas.optional_text(payload.get("protocol"), max_len=16, name="协议档")
+        protocol = phase_module.normalize_profile(protocol_raw)
+        if protocol_raw and protocol_raw.strip().lower() not in phase_module.PROFILES:
+            raise ValidationError(
+                f"协议档只能是 {sorted(phase_module.PROFILES)} 之一（收到 {protocol_raw!r}）",
+                detail=protocol_raw)
 
         with store.connect(db_path) as conn:
             subject = repo.find_subject(conn, public_id)
@@ -516,6 +531,7 @@ def build_router(settings: Settings) -> Router:
                 device=device, srate=srate, channels=channels,
                 source="lsl" if device.startswith("lsl:") else "sim-bsense",
                 time_scale=time_scale, training_mode=training_mode,
+                protocol=protocol,
                 engine_versions=bootstrap.engine_versions(),
             )
         # 注意：这里必须已经退出 `with store.connect(...)`（事务提交、连接释放），
@@ -553,7 +569,11 @@ def build_router(settings: Settings) -> Router:
         return Response.json({
             "session": session_public(row, extra={"participant": public_id}),
             "events_url": f"/api/sessions/{row['uuid']}/events",
-            "phases": phase_module.as_list(),
+            # 阶段列表按本次会话的协议档给：短协议只有 9 步，界面步进条据此渲染
+            "phases": phase_module.as_list(row["protocol"] if "protocol" in row.keys() else None),
+            "protocol": protocol,
+            "protocol_label": phase_module.PROFILES[protocol]["label"],
+            "protocol_note": phase_module.PROFILES[protocol]["caveat"],
             "runtime": {"alive": runtime.alive, "source": runtime.source.key if runtime.source else None},
         }, status=201)
 
