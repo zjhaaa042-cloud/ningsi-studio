@@ -565,6 +565,12 @@ body.subject-mode .view { padding: 10px 16px 28px; }
 .wizard__ok { color: var(--text); font-weight: 600; margin: 0; }
 .wizard__warn { color: var(--text); font-weight: 600; margin: 0; }
 .wizard__plan { margin: 4px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+/* 「脑电（EEG）— 本产品只用这一条」这类分组小标题：让"该选哪条流"一眼可辨 */
+.wizard__section { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: var(--text); }
+/* 其它传感器流：默认折叠，避免和推荐项抢注意力 */
+.wizard__others { margin-top: 10px; padding: 8px 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
+.wizard__others > summary { cursor: pointer; color: var(--text-3); font-size: 12px; }
+.wizard__others > .pick-list { margin-top: 8px; }
 
 /* 大块单选（被试/设备/节奏都用它，点一下即选中） */
 .pick-list { display: flex; flex-wrap: wrap; gap: 8px; }

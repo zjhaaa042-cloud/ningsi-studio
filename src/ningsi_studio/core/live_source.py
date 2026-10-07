@@ -103,6 +103,45 @@ def cached_sources(probe_seconds: float = 0.4, ttl: float = 3.0) -> list[dict]:
     return sources
 
 
+#: 已知的**非脑电**流类型。一台 BioMultiLite 会同时推 6~7 条流
+#: （EEG / Metric / FNIRS / HeartRate / General Metric / Motion / Marker），
+#: 但本产品的质检、频谱、专注/放松/负荷指标与 SART/PVT 判定**全部基于脑电通道**：
+#: 拿 FNIRS（近红外）或 Metric 跑一遍，照样会算出一堆看着很像的数字，却没有意义。
+#: 所以建会话时对"已知非脑电"的流直接 409（除非显式 allow_non_eeg），
+#: 类型为空/未知的流不拦（可能只是采集端没写 type 字段）。
+NON_EEG_STREAM_KINDS = frozenset({
+    "fnirs", "metric", "motion", "heart_rate", "general_metric", "marker",
+})
+
+#: 中文名（错误信息与界面共用，避免各写一份对不上）
+STREAM_KIND_LABELS = {
+    "eeg": "脑电（EEG）",
+    "fnirs": "近红外（FNIRS）",
+    "metric": "设备指标（Metric）",
+    "motion": "运动（Motion）",
+    "heart_rate": "心率（HeartRate）",
+    "general_metric": "通用指标（General Metric）",
+    "marker": "事件标记（Marker）",
+    "sim": "内置仿真",
+}
+
+
+def stream_kind_label(kind: object) -> str:
+    key = str(kind or "").strip().lower()
+    return STREAM_KIND_LABELS.get(key, key or "未知类型")
+
+
+def is_eeg_stream(row: dict) -> bool:
+    """这条流是不是脑电。类型为空/未知时返回 False（调用方需自行决定是否放行）。"""
+    return str(row.get("stream_kind") or "").strip().lower() == "eeg"
+
+
+def rejected_kind(row: dict) -> str | None:
+    """返回被拒绝的原因类型（已知非脑电），否则 None。"""
+    kind = str(row.get("stream_kind") or "").strip().lower()
+    return kind if kind in NON_EEG_STREAM_KINDS else None
+
+
 def detected_source(sources: list[dict] | None = None, probe_seconds: float = 0.4) -> dict | None:
     """当前**真正检测到**的实时数据源；一个都没有就返回 None（界面据此显示"无信号"）。
 
@@ -196,6 +235,11 @@ def list_available(probe_seconds: float = 2.0) -> list[dict]:
             # 归一后的流类型（eeg / metric / heart_rate / motion …）：缺省选源要按它排序，
             # 否则同一台设备的多条流里可能先拿到 Metric（还没有样本）而不是 EEG。
             "stream_kind": item.get("kind"),
+            # 给界面直接用：中文类型名 + 是不是脑电 + 本产品能不能用它跑检测
+            # （一台 BioMultiLite 推 6~7 条流，只有 EEG 那条能用，用户会问"选哪个"）
+            "stream_kind_label": stream_kind_label(item.get("kind")),
+            "is_eeg": str(item.get("kind") or "").strip().lower() == "eeg",
+            "usable": str(item.get("kind") or "").strip().lower() not in NON_EEG_STREAM_KINDS,
             "channel_labels": item.get("channel_labels", []),
             "source_id": item.get("source_id", ""),
         })

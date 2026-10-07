@@ -173,10 +173,23 @@ DELETE /api/devices/preview          → { "active": false, "stopped": true }
 
 | `device` | 行为 |
 |---|---|
-| 省略 / `""` / `auto` | 用**当前检测到的实时源**（真机优先，其次内置仿真 outlet）；**一个都没有 ⇒ `409`**，消息里给接入指引 |
+| 省略 / `""` / `auto` | 用**当前检测到的实时源**（真机优先、脑电流优先于同机的 Metric/HeartRate 等，其次内置仿真 outlet）；**一个都没有 ⇒ `409`**，消息里给接入指引 |
 | `lsl:<流名称>` | 先确认该流现在可见，否则 `409`（fail fast，不再"建好会话才发现没信号"）；连接后 `srate`/`channels` 按流描述符回写 |
 | `sim-bsense` | **允许，但必须显式**：这是演示/自测入口，`source`/SSE 事件/报告都会标注为仿真 |
 | 其它任意字符串 | `422 validation_failed`（不再被当成仿真源） |
+
+**流类型守卫（2026-10-07 新增）**：一台 BioMultiLite 会同时推 6~7 条流
+（`eeg` / `metric` / `fnirs` / `heart_rate` / `general_metric` / `motion` / `marker`），
+**只有 `eeg` 那条能用于本产品**——质检、频谱、专注/放松/负荷指标与 SART/PVT 判定全部基于脑电通道。
+选错流的后果不是报错而是"算出一堆看着很像的数字"，所以建会话时：
+
+- 流类型属于 `fnirs` / `metric` / `motion` / `heart_rate` / `general_metric` / `marker`
+  ⇒ **`409`**，消息里写明它是什么流、为什么不能用，并在 `detail.eeg_candidates` 里给出可用的 EEG 流键；
+- 类型为空/未知的流**不拦**（可能只是采集端没写 `type` 字段）；
+- 确实要用非脑电流采集时显式传 **`allow_non_eeg: true`**（放行后仍会因流打不开而如实失败）。
+
+`GET /api/devices` 的每条 source 因此多了三个字段，界面据此把 EEG 单独标为推荐、其余折叠：
+`stream_kind_label`（中文类型名，如 `近红外（FNIRS）`）、`is_eeg`（是否脑电）、`usable`（本产品能否用它跑检测）。
 
 不再有"真实设备打不开就降级为仿真源"的静默替换：真实源不可用时会话启动失败并写明
 `无信号：数据源 <device> 不可用（…）`。

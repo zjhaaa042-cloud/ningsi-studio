@@ -448,12 +448,29 @@ def build_router(settings: Settings) -> Router:
                     "并确认在推流；仅做演示或自测时，请在“设备 / 数据源”里显式选择仿真源 sim-bsense")
         elif device.startswith("lsl:"):
             stream_name = device.split(":", 1)[1]
-            keys = {row.get("key") for row in live_source.list_available(1.0)}
+            rows = live_source.list_available(1.0)
+            keys = {row.get("key") for row in rows}
             if device not in keys:
                 visible = sorted(key for key in keys if str(key).startswith("lsl:"))
                 raise Conflict(
                     f"未发现 LSL 流 {stream_name}（当前可见：{visible or '无'}）；"
                     f"请确认采集端正在推流（GET /api/devices 可列出可见流）")
+            # 必须是脑电流：一台设备同时推 EEG / FNIRS / Metric / HeartRate / Motion …，
+            # 选错流照样能算出"看着像"的数字，但报告毫无意义（用户 2026-10-07 就卡在这里问
+            # "这六个实时数据应该怎么选"）。已知非脑电的类型直接 409，并说清为什么。
+            row = next((item for item in rows if item.get("key") == device), {})
+            bad_kind = live_source.rejected_kind(row)
+            if bad_kind and not schemas.as_bool(payload.get("allow_non_eeg"), False):
+                raise Conflict(
+                    f"{stream_name} 不是脑电流（类型 {live_source.stream_kind_label(bad_kind)}）："
+                    f"本产品的质检、频谱、专注/放松/负荷指标与 SART/PVT 判定都基于脑电通道，"
+                    f"用这条流跑出来的报告没有意义。请改选 EEG 流"
+                    f"（通常形如 lsl:<设备名> EEG-…）；确实要用它采集时显式传 allow_non_eeg=true。",
+                    detail={"device": device, "stream_kind": bad_kind,
+                            "eeg_candidates": sorted(key for key in keys
+                                                     if str(key).startswith("lsl:")
+                                                     and live_source.is_eeg_stream(
+                                                         next((r for r in rows if r.get("key") == key), {})))})
         elif device != live_source.SIM_SOURCE:
             raise ValidationError(
                 f"设备 / 数据源只能是 lsl:<流名称>（实时设备）或 {live_source.SIM_SOURCE}"

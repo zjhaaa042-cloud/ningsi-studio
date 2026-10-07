@@ -99,9 +99,22 @@ export async function render(container, ctx) {
     paint();
   };
 
+  /**
+   * 当前选的数据源能不能用来跑本产品。
+   * 仿真源可以（显式选的演示）；真实流必须是脑电；手填的键交给后端判定。
+   * 用于两处：第 2 步「下一步」的门控、以及选中非脑电流时的显式警告。
+   */
+  const deviceIsUsable = () => {
+    if (!local.device) return false;
+    if (local.device === 'sim-bsense') return true;
+    const row = real.find((item) => String(pick(item, 'key', '')) === local.device);
+    if (!row) return true;
+    return pick(row, 'usable', true) !== false;
+  };
+
   const canNext = () => {
     if (local.step === 0) return Boolean(local.subject);
-    if (local.step === 1) return Boolean(local.device);
+    if (local.step === 1) return deviceIsUsable();
     return true;
   };
 
@@ -179,26 +192,62 @@ export async function render(container, ctx) {
     return host2;
   };
 
-  /* ---------------------------------------------------------- 第 2 步：设备 */
+  /**
+   * 第 2 步：确认设备。
+   *
+   * 用户实测提问："这六个实时数据，应该怎么选择"——一台 BioMultiLite 会同时推
+   * EEG / Metric / FNIRS / HeartRate / General Metric / Motion 六条流，界面原来把它们
+   * 平铺成一排同等权重，谁也看不出该选哪个。实际只有 **EEG** 那条能用：
+   * 质检、频谱、专注/放松/负荷指标与 SART/PVT 判定全都基于脑电通道。
+   * 所以这里分成两段：脑电（推荐、默认选中）+ 折叠起来的"其它传感器流（本产品不使用）"。
+   */
   const paintDeviceStep = () => {
     const host2 = el('div', { class: 'stack' });
-    if (realDevice) {
+    if (real.length) {
       host2.append(el('p', { class: 'wizard__ok', text: `✓ 检测到 ${fmtInt(real.length)} 个实时数据源` }));
-      const listHost = el('div', { class: 'pick-list' });
-      for (const item of real) {
+      const eegStreams = real.filter((item) => pick(item, 'is_eeg', false) === true);
+      const otherStreams = real.filter((item) => pick(item, 'is_eeg', false) !== true);
+      const chip = (item) => {
         const key = String(pick(item, 'key', ''));
         const simulated = Boolean(pick(item, 'simulated', false));
-        listHost.append(el('button', {
+        const kindLabel = pick(item, 'stream_kind_label', null) || '未知类型';
+        return el('button', {
           class: 'pick' + (local.device === key ? ' pick--on' : ''),
           type: 'button',
           onClick: () => { local.device = key; paint(); },
         }, [
           el('span', { class: 'pick__title', text: String(pick(item, 'device', key)) }),
-          el('span', { class: 'pick__note', text: `${pick(item, 'channels', '?')} 通道 · ${pick(item, 'srate', '?')} Hz`
+          el('span', { class: 'pick__note', text: `${kindLabel}｜${pick(item, 'channels', '?')} 通道 · ${pick(item, 'srate', '?')} Hz`
             + (simulated ? '｜内置仿真流（非真实设备）' : '') }),
-        ]));
+        ]);
+      };
+
+      if (eegStreams.length) {
+        host2.append(el('p', { class: 'wizard__section', text: '脑电（EEG）— 本产品只用这一条' }));
+        const listHost = el('div', { class: 'pick-list' });
+        for (const item of eegStreams) listHost.append(chip(item));
+        host2.append(listHost);
+        host2.append(el('p', { class: 'muted', text: '质检、频谱、专注/放松/负荷指标与 SART/PVT 判定都基于脑电通道，'
+          + '所以选它。默认已经选好，直接「下一步」即可。' }));
+      } else {
+        host2.append(el('p', { class: 'wizard__warn', text: '✗ 没有检测到脑电（EEG）流' }));
+        host2.append(el('p', { class: 'muted', text: '下面这些是设备附带的其它传感器流，本产品不用它们做指标；'
+          + '请确认 BioMultiLite 已勾选 EEG 并开始推流。' }));
       }
-      host2.append(listHost);
+
+      if (otherStreams.length) {
+        const kinds = [...new Set(otherStreams.map((item) => pick(item, 'stream_kind_label', null) || '未知类型'))];
+        const details = el('details', { class: 'wizard__others' });
+        details.append(el('summary', {
+          text: `其它 ${fmtInt(otherStreams.length)} 个传感器流（${kinds.join(' / ')}）— 本产品不使用，仅列出`,
+        }));
+        const otherHost = el('div', { class: 'pick-list' });
+        for (const item of otherStreams) otherHost.append(chip(item));
+        details.append(otherHost);
+        details.append(el('p', { class: 'muted', text: '这些流是同一台设备附带的传感器数据（近红外、运动、心率、设备指标等），'
+          + '本产品不读取它们；选它们开始检测会被后端拒绝（409），因为那样跑出的报告没有意义。' }));
+        host2.append(details);
+      }
     } else {
       host2.append(el('p', { class: 'wizard__warn', text: '✗ 没有检测到脑电信号' }));
       host2.append(el('div', { class: 'stack' }, [
@@ -212,6 +261,11 @@ export async function render(container, ctx) {
       choiceCard('用仿真源演示（非真实设备）', '不接硬件也能把流程走完；报告里会标注"仿真"',
         local.device === 'sim-bsense', () => { local.device = 'sim-bsense'; paint(); }),
     ]));
+    if (local.device && local.device !== 'sim-bsense' && deviceIsUsable() === false) {
+      const row = real.find((item) => String(pick(item, 'key', '')) === local.device) || {};
+      host2.append(el('p', { class: 'wizard__warn', text: `所选流不是脑电流（${pick(row, 'stream_kind_label', '未知类型')}）：`
+        + '本产品需要脑电通道，请改选上面的 EEG 流，或显式选修仿真源做演示。' }));
+    }
     host2.append(el('p', { class: 'muted', text: '选定后建议先在下面点「开始预览」，看到波形再进入下一步——'
       + '否则开始检测后才发现没信号，会白等一次。' }));
     // 预览卡只建一次：renderPreviewCard 会注册轮询定时器，每次 paint() 都重建会越积越多

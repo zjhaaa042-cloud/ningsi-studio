@@ -20,6 +20,9 @@ from ningsi_studio import bootstrap
 from ningsi_studio.api.routes import API_TITLE, API_VERSION
 from ningsi_studio.settings import Settings
 
+from unittest import mock
+import json
+
 
 class HealthTests(StudioTestCase):
     """`/api/health` 的字段结构。"""
@@ -310,6 +313,56 @@ class NoSignalPolicyTests(StudioTestCase):
         payload = self.json_body(response, 201, "显式选择仿真源仍应允许（演示/自测）")
         self.assertEqual(payload["session"]["source"], "sim-bsense", "显式仿真会话应标注 source")
         self.delete(f"/api/sessions/{payload['session']['uuid']}")
+
+    # ---------------------------------------------------------------- 流类型
+    # 用户实测提问："这六个实时数据，应该怎么选择"——一台 BioMultiLite 同时推
+    # EEG / Metric / FNIRS / HeartRate / General Metric / Motion，只有 EEG 那条能用。
+    # 选错的后果不是"报错"而是"算出一堆看着像的数字"（比报错更危险），所以后端要拦。
+
+    def test_stream_kind_helpers(self) -> None:
+        from ningsi_studio.core import live_source as ls
+        self.assertEqual(ls.rejected_kind({"stream_kind": "fnirs"}), "fnirs")
+        self.assertEqual(ls.rejected_kind({"stream_kind": "Metric"}), "metric", "大小写不敏感")
+        self.assertIsNone(ls.rejected_kind({"stream_kind": "eeg"}))
+        self.assertIsNone(ls.rejected_kind({}),
+                          "类型为空/未知的流不拦：可能只是采集端没写 type，不能一律当成非脑电")
+        self.assertTrue(ls.is_eeg_stream({"stream_kind": "EEG"}))
+        self.assertFalse(ls.is_eeg_stream({"stream_kind": "fnirs"}))
+        self.assertIn("近红外", ls.stream_kind_label("fnirs"), "中文类型名要给界面直接用")
+
+    def test_non_eeg_stream_session_is_rejected(self) -> None:
+        """选非脑电流建会话 ⇒ 409，且错误信息里给出 EEG 候选（不依赖真机）。"""
+        from ningsi_studio.core import live_source as ls
+        fake = [
+            {"key": "lsl:Fake EEG-0001", "kind": "lsl", "stream_kind": "eeg", "real": True,
+             "simulated": False, "device": "Fake EEG-0001", "srate": 250.0, "channels": 2},
+            {"key": "lsl:Fake IR-0002", "kind": "lsl", "stream_kind": "fnirs", "real": True,
+             "simulated": False, "device": "Fake IR-0002", "srate": 25.0, "channels": 16},
+        ]
+        with mock.patch.object(ls, "list_available", return_value=fake):
+            error = self.assert_error(
+                self._create({"device": "lsl:Fake IR-0002", "time_scale": 0.05, "create_subject": True}),
+                409, "conflict", "非脑电流建会话应 409（否则报告没有意义）")
+            self.assertIn("不是脑电流", error["message"])
+            self.assertIn("近红外", error["message"], "要说清它到底是什么流")
+            self.assertIn("Fake EEG-0001", json.dumps(error, ensure_ascii=False),
+                          "错误信息里要给出 EEG 候选，使用者才知道该选哪条")
+
+    def test_non_eeg_stream_allowed_with_explicit_flag(self) -> None:
+        """显式 allow_non_eeg=true 时不再被类型拦（留给"用别家 EEG 流但类型标注不规范"等场景）。"""
+        from ningsi_studio.core import live_source as ls
+        from ningsi_studio.core import runtime as runtime_module
+        fake = [{"key": "lsl:Fake IR-0002", "kind": "lsl", "stream_kind": "fnirs", "real": True,
+                 "simulated": False, "device": "Fake IR-0002", "srate": 25.0, "channels": 16}]
+        # 不真的去连这条流：直接把启动打成快速失败，只看"类型守卫有没有放行"
+        with mock.patch.object(ls, "list_available", return_value=fake), \
+                mock.patch.object(runtime_module, "build_source",
+                                  side_effect=RuntimeError("fake stream unavailable")):
+            response = self._create({"device": "lsl:Fake IR-0002", "allow_non_eeg": True,
+                                     "time_scale": 0.05, "create_subject": True})
+        self.assertEqual(response.status, 409, "流打不开仍应如实 409")
+        self.assertNotIn("不是脑电流", json.dumps(response.json(), ensure_ascii=False),
+                         "allow_non_eeg=true 时不应再被类型守卫拦下")
 
 
 class PreviewTests(StudioTestCase):
