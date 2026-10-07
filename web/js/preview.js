@@ -46,8 +46,8 @@ export function renderPreviewCard(ctx, host) {
         : '未开始预览：点击下方按钮读取当前检测到的脑电信号。';
       deviceLine.textContent = '';
       qualityLine.textContent = '';
+      // 卡片副标题已经写明"只读、不创建会话、不写入数据库"，这里不再重复第三遍
       waveHost.textContent = '';
-      waveHost.append(el('p', { class: 'muted', text: '预览不会创建会话，也不写入数据库。' }));
       return;
     }
     const live = payload.live !== false && payload.no_signal !== true;
@@ -56,9 +56,9 @@ export function renderPreviewCard(ctx, host) {
       : `无信号：数据源 ${payload.source} 已连接但最近没有样本`
         + (payload.seconds_since_last === null || payload.seconds_since_last === undefined
           ? '' : `（最近一个样本 ${payload.seconds_since_last}s 前）`);
-    deviceLine.textContent = [
-      `采样率 ${payload.srate || '—'} Hz`,
-      `通道 ${payload.channels || '—'}`,
+    // 缓冲点数 / 调理口径属于排障细节：正文只留采样率与通道，细节进 title（鼠标悬停可见）
+    deviceLine.textContent = `采样率 ${payload.srate || '—'} Hz｜通道 ${payload.channels || '—'}`;
+    deviceLine.title = [
       payload.buffered_samples === null || payload.buffered_samples === undefined
         ? null : `缓冲 ${payload.buffered_samples} 点`,
       payload.conditioning && payload.conditioning.spec ? `调理 ${payload.conditioning.spec}` : null,
@@ -90,8 +90,7 @@ export function renderPreviewCard(ctx, host) {
         : (ok === false ? `不可用（${list(verdict.reasons).join('、')}）` : '样本不足，暂不判定');
       qualityLine.textContent = `本窗质检：${label}`
         + `｜峰峰值 ${payload.peak_uv} µV｜均值标准差 ${payload.std_uv} µV`
-        + (note ? `｜${note}` : '')
-        + '（判定门槛与报告一致：config.quality）';
+        + (note ? `｜${note}` : '');
     } else {
       qualityLine.textContent = '';
     }
@@ -152,7 +151,6 @@ export function renderPreviewCard(ctx, host) {
     if (running) {
       actionHost.append(
         button('停止预览', stop, { small: true }),
-        el('span', { class: 'muted', text: '预览只读实时流，不创建会话、不写入数据库' }),
       );
       return;
     }
@@ -164,14 +162,14 @@ export function renderPreviewCard(ctx, host) {
 
   renderActions();
   host.append(card('设备实时预览', el('div', {}, [
-    el('p', { class: 'muted', text: '不开始会话也能看当前脑电信号：读取检测到的 LSL 流，做与报告一致的真机调理，'
+    el('p', { class: 'muted', text: '不开始会话也能看当前脑电信号：读取检测到的设备，做与报告一致的真机调理，'
       + '并给出这一窗的质检判定。' }),
     actionHost,
     deviceLine,
     statusLine,
     waveHost,
     qualityLine,
-  ]), { sub: '来源：GET/POST/DELETE /api/devices/preview（无会话预览）' }));
+  ]), { sub: '只读、不创建会话、不写入数据库' }));
   refresh();
   return { stopPolling };
 }

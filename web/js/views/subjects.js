@@ -256,7 +256,7 @@ function renderNewSessionPanel(ctx, publicId, options = {}) {
   }
   modeSelect.value = 'quick';
   const { input: deviceInput, datalist: deviceOptions } = deviceField();
-  const deviceHint = el('span', { class: 'muted', text: '正在探测可用数据源（GET /api/devices）…' });
+  const deviceHint = el('span', { class: 'muted', text: '正在探测可用数据源…' });
   // 探测失败（例如未装 pylsl）不影响填表：输入框仍可手填 lsl:<流名称>
   api.devices(1.0).then((response) => {
     if (ctx.signal.aborted) return;

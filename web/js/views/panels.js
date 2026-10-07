@@ -53,7 +53,7 @@ function metricTable(title, metrics) {
 function renderModelResult(result) {
   if (!result || typeof result !== 'object') {
     return card('训练结果', [
-      empty('接口没有返回训练结果（POST /api/models/train 的响应为空）。'),
+      empty('接口没有返回训练结果（响应为空）。'),
     ], { sub: '模型训练由后端完成；返回为空时这里只显示空态，不会伪造指标。' });
   }
   const features = list(pick(result, 'features', []));
@@ -131,7 +131,7 @@ export const models = {
       }
       if (ctx.signal.aborted) return;
       renderResult();
-    }, { primary: true, title: '调用 POST /api/models/train' });
+    }, { primary: true, title: '在本机训练一个基线分类模型' });
 
     function renderResult() {
       resultHost.textContent = '';
@@ -144,13 +144,13 @@ export const models = {
         if (status === 401 || status === 404) {
           errorHost.append(card('无法训练模型', [
             empty(status === 401
-              ? '没有权限调用 POST /api/models/train（HTTP 401）。请在启动服务时配置访问令牌后重试。'
+              ? '没有权限调用训练接口（HTTP 401）。请在启动服务时配置访问令牌后重试。'
               : '服务器上没有这个接口（HTTP 404）。可能后端版本较旧，或该接口被关闭。'),
           ], { sub: '接口不可用时只显示空态，不会伪造训练结果。' }));
         } else {
           const detail = pick(error, 'detail', null) || pick(error, 'payload', null);
           errorHost.append(card('训练失败', [
-            empty(`POST /api/models/train 失败：${describeError(error)}`),
+            empty(`模型训练失败：${describeError(error)}`),
             detail ? el('p', { class: 'muted', text: typeof detail === 'string' ? detail : JSON.stringify(detail) }) : null,
           ], { sub: '参数需满足 subjects ∈ [2, 40]、windows_per_state ∈ [1, 200]，否则后端返回 422。' }));
         }
@@ -184,7 +184,7 @@ export const models = {
       el('p', { class: 'muted', text: '训练数据来自后端内置仿真被试（sim00、sim01…），接口不接受「选会话 / 选被试」；真实数据训练请用命令行脚本。' }),
       errorHost,
     ], {
-      sub: 'POST /api/models/train；本面板不会改动画布与路由以外的逻辑。',
+      sub: '在本机训练，不影响已有会话数据',
     }));
 
     host.append(resultHost);
@@ -203,17 +203,17 @@ function kindText(kind) {
   return raw;
 }
 
-function renderSources(sources, sourcesError) {
+function renderSources(sources, sourcesError, conditionNote) {
   const rows = list(sources);
   if (sourcesError) {
     return card('可用数据源', [
       empty(`探测数据源失败：${sourcesError}`),
-    ], { sub: 'GET /api/devices/status 的 sources 返回错误时只显示空态。' });
+    ], { sub: '探测失败时只显示空态，不影响已有会话' });
   }
   if (!rows.length) {
     return card('可用数据源', [
       empty('没有探测到可用数据源。若需要真实设备，请先启动采集端（如 BioMultiLite / BSense-R）或运行 python -m ningsi_studio simulate-outlet。'),
-    ], { sub: 'GET /api/devices/status → sources' });
+    ], { sub: '未探测到数据源' });
   }
   return card('可用数据源', [
     table([
@@ -232,8 +232,8 @@ function renderSources(sources, sourcesError) {
       channels: fmtInt(pick(row, 'channels', null)),
       real: pick(row, 'real', null) === true ? '是' : (pick(row, 'real', null) === false ? '否（仿真）' : DASH),
       note: pick(row, 'note', DASH),
-    })), { caption: '来源：GET /api/devices/status → sources（真实设备未启动时只有仿真源）' }),
-  ], { sub: '仿真源没有硬件，srate/channels 由配置给出，不代表真实采集能力。', class: 'card--scroll' });
+    })), { caption: conditionNote || '真实设备未启动时只有仿真源可选（仿真仅用于演示与自测）' }),
+  ], { sub: '「实时硬件」列标出是否为真机；仿真源仅用于演示与自测', class: 'card--scroll' });
 }
 
 function renderDeviceHealth(devices, hardwareNote) {
@@ -242,7 +242,7 @@ function renderDeviceHealth(devices, hardwareNote) {
     return card('运行中会话的设备健康状况', [
       empty('当前没有正在运行的会话占用信号源；启动一次实时会话后这里会显示是否在收数、实测采样率与流错误。'),
       hardwareNote ? el('p', { class: 'muted', text: hardwareNote }) : null,
-    ], { sub: 'GET /api/devices/status → devices（只包含 manager.active_uuids() 里的会话）' });
+    ], { sub: '只显示正在运行的会话' });
   }
   return card('运行中会话的设备健康状况', [
     table([
@@ -267,7 +267,7 @@ function renderDeviceHealth(devices, hardwareNote) {
       total: fmtInt(pick(row, 'total_samples', null)),
       errors: fmtInt(pick(row, 'stream_errors', null)),
     })), {
-      caption: '「在收数 / 实测采样率」缺失显示 —：仿真源没有硬件，不会给出实测值',
+      caption: '「在收数 / 实测采样率」缺失显示 —：仿真源没有硬件，不给实测值',
     }),
   ], { sub: '用于现场判断「设备掉了」还是「信号正常」。' });
 }
@@ -278,7 +278,7 @@ export const devices = {
       button('立即刷新', () => ctx.reload()),
     ]);
 
-    const statusHost = el('p', { class: 'muted', text: '正在读取 GET /api/devices/status …' });
+    const statusHost = el('p', { class: 'muted', text: '正在读取设备状态…' });
     const bodyHost = el('div');
     host.append(statusHost, bodyHost);
     // 实时预览放在最前：现场第一步就是"现在到底有没有信号、波形正不正常"，
@@ -294,11 +294,12 @@ export const devices = {
         const data = response.data || {};
         const devices = list(pick(data, 'devices', []));
         const sources = list(pick(data, 'sources', []));
+        const conditionNote = pick(data, 'condition_note', null);
         const active = list(pick(data, 'active_sessions', []));
         statusHost.textContent = `运行中会话 ${active.length} 个｜可用数据源 ${sources.length} 个｜更新时间 ${new Date().toLocaleTimeString('zh-CN')}`;
         bodyHost.textContent = '';
         bodyHost.append(
-          renderSources(pick(data, 'sources', []), pick(data, 'sources_error', null)),
+          renderSources(pick(data, 'sources', []), pick(data, 'sources_error', null), conditionNote),
           renderDeviceHealth(devices, pick(sources.find((row) => pick(row, 'hardware_note', null)) || {}, 'hardware_note', null)),
         );
       } catch (error) {
@@ -309,7 +310,7 @@ export const devices = {
           bodyHost.textContent = '';
           bodyHost.append(card('无法读取设备状态', [
             empty(status === 401
-              ? '没有权限读取 GET /api/devices/status（HTTP 401）。请在启动服务时配置访问令牌后重试。'
+              ? '没有权限读取设备状态（HTTP 401）。请在启动服务时配置访问令牌后重试。'
               : '服务器上没有这个接口（HTTP 404）。可能后端版本较旧，或该接口被关闭。'),
           ], { sub: '接口不可用时只显示空态，不会白屏。' }));
           if (timer) { clearInterval(timer); timer = null; }
@@ -319,7 +320,7 @@ export const devices = {
         statusHost.textContent = '';
         bodyHost.textContent = '';
         bodyHost.append(card('设备状态读取失败', [
-          empty(`GET /api/devices/status 失败：${describeError(error)}`),
+          empty(`设备状态读取失败：${describeError(error)}`),
         ]));
       }
     }

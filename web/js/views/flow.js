@@ -558,7 +558,8 @@ export function render(container, ctx) {
     if (local.auto && pick(phase, 'auto_note', null)) {
       more.push(el('p', { class: 'muted step__auto', text: `快速演示：${pick(phase, 'auto_note')}` }));
     }
-    more.push(el('p', { class: 'muted', text: `会话状态：${statusText(pick(session, 'status', null))}｜设备：${pick(session, 'device', DASH)}｜时间倍率：${fmtNum(pick(session, 'time_scale'), 2)}｜采样率：${fmtNum(pick(session, 'srate'), 0)} Hz` }));
+    // 时间倍率 / 采样率属于调试细节，不在这里显示（口径与设备参数仍可在报告的"运行环境"里查）
+    more.push(el('p', { class: 'muted', text: `会话状态：${statusText(pick(session, 'status', null))}｜设备：${pick(session, 'device', DASH)}` }));
     if (local.auto) {
       more.push(el('p', { class: 'muted', text: '本次为快速演示模式（time_scale < 0.2）：量表与行为任务由服务端生成确定性作答。' }));
     }
@@ -748,7 +749,7 @@ export function render(container, ctx) {
         ].filter(Boolean).join('｜'),
       })),
       el('p', { class: 'muted', text: '量表结果仅用于研究与自我调节参考，不构成医学诊断。' }),
-    ]), { sub: '计分由后端完成（来源：scale_scored / scales 事件，或已结束会话的报告接口）' }));
+    ]), { sub: '粗分 / 标准分 / 程度由后端计分' }));
   };
 
   const ensureScaleSlot = (code, label, size, instruction) => {
@@ -980,7 +981,7 @@ export function render(container, ctx) {
       actions.length ? el('div', { class: 'row', style: 'margin-top:10px' }, actions) : null,
       el('p', { class: 'muted', text: answered
         ? '本试次已记账，等下一个刺激出现即可。'
-        : '键盘：空格作答（页面已阻止空格滚动）；也可以用鼠标/触屏点击上面的刺激区。反应时按刺激呈现到作答的 performance.now() 差值（秒）上报。' }),
+        : '键盘空格或点击刺激区都能作答；反应时按刺激呈现到作答的间隔上报。' }),
     ])));
     slot.stage = stage;
     slot.timer = timer;
@@ -1412,7 +1413,7 @@ export function render(container, ctx) {
         slot.host.append(card(`${payload.task === 'sart' ? 'SART' : 'PVT-B'} 结果`, table([
           { title: '指标', render: (row) => row[0] },
           { title: '值', align: 'right', render: (row) => row[1] },
-        ], rows), { sub: `口径 ${pick(result, 'spec', DASH)}` }));
+        ], rows), { sub: '漏报 / 虚报 / 反应时与变异' }));
         break;
       }
       case 'monitor': {

@@ -89,7 +89,7 @@ export async function render(container, ctx) {
     });
   }
 
-  const filterCard = card('筛选与口径', el('div', { class: 'filters' }, [
+  const filterCard = card('筛选', el('div', { class: 'filters' }, [
     field('被试', participantSelect),
     field('会话状态', statusSelect),
     field('趋势指标', fieldSelect),
@@ -193,7 +193,7 @@ export async function render(container, ctx) {
   /* ---------------------------------------------------------- 趋势图 */
   const trendHost = el('div');
   host.append(card('周 / 月趋势', trendHost, {
-    sub: '字段与周期由上方筛选控制；数据来自 GET /api/reports/trend',
+    sub: '字段与周期由上方筛选控制',
   }));
 
   try {

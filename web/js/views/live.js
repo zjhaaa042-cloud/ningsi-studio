@@ -284,10 +284,9 @@ export function render(container, ctx) {
         { title: '值', render: (row) => row[1] },
       ], [
         ['会话 uuid', uuid],
-        ['时间倍率', fmtNum(pick(session, 'time_scale'), 2)],
         ['采样率 / 通道', `${fmtNum(pick(session, 'srate'), 0)} Hz / ${fmtInt(pick(session, 'channels'))}`],
         ['开始时间', fmtTime(pick(session, 'started_at'))],
-        ['引擎口径', Object.entries(pick(session, 'engine_versions', {}) || {}).map(([key, value]) => `${key}=${value}`).join('、') || DASH],
+        // 「时间倍率」与「引擎口径」属于调试信息，界面上不再列（口径仍写在报告正文与导出文档里）
       ]),
     ])));
   };
@@ -381,8 +380,8 @@ export function render(container, ctx) {
         sub: '每条通道独立量程与中线；底部为时间轴。抽稀采用 min/max 保峰值，尖峰会保留',
       }));
       signalHost.append(el('div', { class: 'grid grid--2' }, [
-        card('实时频谱（Welch，与报告同口径）', signalPanel.spectrumBody, {
-          sub: '最近一个可用窗的功率谱（dB）；竖直底色为频带区间定义',
+        card('实时频谱', signalPanel.spectrumBody, {
+          sub: '最近一个可用窗的功率谱（dB）；竖直底色为频带区间',
         }),
         card('频带相对功率', signalPanel.bandBody, {
           sub: '当前可用窗的各频带占比（theta / alpha / beta / gamma）',
@@ -459,7 +458,7 @@ export function render(container, ctx) {
     const items = list(ctx.store.state.alerts);
     const body = el('div');
     alertHost.append(card(`预警时间轴（${fmtInt(items.length)} 条）`, body, {
-      sub: '预警口径来自 config.alerts：阈值 + 连续越界时长 + 解除条件',
+      sub: '判定：阈值 + 连续越界时长 + 解除条件',
     }));
     drawAlertTimeline(body, items);
   };

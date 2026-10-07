@@ -255,7 +255,7 @@ export async function render(container, ctx) {
     } else {
       const markdown = composeMarkdown(data || {}, config);
       host.append(card('评估报告', renderMarkdown(markdown), {
-        sub: `口径 ${pick(data, 'spec', DASH)}｜被试 sub-${pick(data, 'participant', DASH)}`,
+        sub: `被试 sub-${pick(data, 'participant', DASH)}`,
       }));
 
       // 建议与边界单独拆出来，便于快速阅读（原文仍在 Markdown 里）

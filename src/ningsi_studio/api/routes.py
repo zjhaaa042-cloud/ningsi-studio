@@ -298,7 +298,9 @@ def build_router(settings: Settings) -> Router:
         方便现场一眼看出"设备掉了"还是"信号正常"。
         """
         active = manager.active_uuids()
-        payload = {"active_sessions": active, "devices": [], "sources": []}
+        payload = {"active_sessions": active, "devices": [], "sources": [],
+                   # 调理口径统一放在这里显示一次（原来逐条数据源重复，界面里同一句话出现 6 遍）
+                   "condition_note": live_source.CONDITION_NOTE}
         try:
             payload["sources"] = live_source.list_available(probe_seconds=0.3)
         except Exception as exc:  # noqa: BLE001 - 诊断接口不应失败

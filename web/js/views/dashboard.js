@@ -194,15 +194,20 @@ export async function render(container, ctx) {
         class: 'badge' + (pick(quality, 'passed') ? ' badge--strong' : ''),
         text: pick(quality, 'passed') ? '质检通过' : '未达门槛',
       })),
-      fact('来源', 'config.quality.valid_ratio_min'),
     ]);
-    page.append(card('采集质量', el('div', { class: 'gauge-row' }, [gaugeHost, facts]), {
-      sub: '数据来自最近一次已完成会话的 qc 记录（GET /api/sessions/{uuid} → runs[phase=qc]）',
-    }));
+    // 「来源 config.quality.valid_ratio_min」这种口径细节对现场没用：从界面上撤掉，
+    // 只在卡片 title（hover）里留一句，便于有人问起时核对。
+    const qualityCard = card('采集质量', el('div', { class: 'gauge-row' }, [gaugeHost, facts]), {
+      sub: '取自最近一次已完成会话的质检记录',
+    });
+    qualityCard.title = threshold === null
+      ? '门槛来源：config.quality.valid_ratio_min（未配置）'
+      : `门槛 ${fmtPercent(threshold)} 来自 config.quality.valid_ratio_min`;
+    page.append(qualityCard);
   } else {
     page.append(card('采集质量', [
-      empty('最近会话没有质检（qc）阶段记录，无法给出可用窗比例。'),
-    ], { sub: '质检结果来自 GET /api/sessions/{uuid} 的 runs（phase = qc）' }));
+      empty('该会话没有质检记录，无法给出可用窗比例。'),
+    ], { sub: '没有质检阶段记录的会话不出这一项' }));
   }
 
   /* -------------------------------------------------------------- 趋势图 */
@@ -248,7 +253,7 @@ export async function render(container, ctx) {
       trendBody.append(empty(anyDone
         ? `暂无趋势点：已按被试 ${trendCandidates.map((name) => `sub-${name}`).join('、')} 逐个查询，`
           + `均没有可聚合的已完成会话${rejected ? `（其中 ${fmtInt(rejected)} 条因设备/采样率/通道变化被判不可比）` : ''}。`
-        : '暂无趋势点：最近的会话还没有完成（趋势聚合只统计已完成会话），完成后再看这里。'
+        : '暂无趋势点：只统计已完成会话，完成一次会话后再看这里。'
           + (failed ? `（另有 ${fmtInt(failed)} 次查询失败）` : '')));
     } else {
       const { participant, data, points } = shown;
@@ -346,16 +351,14 @@ export async function render(container, ctx) {
       { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
       { title: '开始时间', render: (row) => fmtTime(row.started_at) },
     ], sessionRows) : empty('还没有会话记录，点右上角“去创建会话”到被试管理里开始一次完整流程。'),
-  ], { sub: '点击会话编号进入实时监测；「结束原因」来自会话的 error 字段' });
+  ], { sub: '点击会话编号进入实时监测；「阶段 / 结束原因」说明会话停在哪一步、为什么' });
   page.append(sessionsCard);
 
   /* ------------------------------------------------------------ 运行环境 */
   const engine = pick(health.data, 'engine', {}) || {};
-  const environmentCard = card('运行环境', el('div', { class: 'grid grid--3' }, [
-    el('div', {}, [
-      el('p', { class: 'muted', text: '引擎口径' }),
-      el('p', { class: 'mono', text: `频谱 ${engine.spectrum || DASH}｜指标 ${engine.indicator || DASH}｜基线 ${engine.baseline || DASH}｜评估 ${engine.assessment || DASH}` }),
-    ]),
+  // 口径（product / spectrum / indicator / baseline / assessment）属于"可忽略"的运行细节：
+  // 界面上不再单列一格，只放进卡片 title（hover 可见）；完整口径仍写在报告正文与导出文档里。
+  const environmentCard = card('运行环境', el('div', { class: 'grid grid--2' }, [
     el('div', {}, [
       el('p', { class: 'muted', text: '并发上限' }),
       el('p', { class: 'mono', text: `${fmtInt(pick(health.data, 'max_active_sessions'))} 个会话；当前运行 ${fmtInt(list(pick(health.data, 'active_sessions', [])).length)} 个` }),
@@ -373,6 +376,8 @@ export async function render(container, ctx) {
       }),
     ]),
   ]));
+  environmentCard.title = `引擎口径：频谱 ${engine.spectrum || DASH}｜指标 ${engine.indicator || DASH}`
+    + `｜基线 ${engine.baseline || DASH}｜评估 ${engine.assessment || DASH}`;
   page.append(environmentCard);
 
   container.textContent = '';

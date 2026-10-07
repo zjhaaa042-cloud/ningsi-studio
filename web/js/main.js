@@ -182,9 +182,13 @@ function updateHeader() {
   sourceBadge.classList.toggle('badge--strong', noSignal
     || String(effectiveKind || '').toLowerCase() === 'sim');
 
+  // 引擎口径（product / spectrum=welch-v1 …）**不在顶栏显示**：用户明确说"口径是什么没必要显示"。
+  // 需要时仍可查：仪表盘「运行环境」卡的 hover、评估报告正文与导出文档、GET /api/config。
+  // 元素保留（验收/其它视图可能引用 id），内容只放进 title。
   const specs = pick(health, 'engine', null) || pick(config, 'specs', {}) || {};
-  engineBadge.textContent = `口径：${Object.entries(specs).map(([key, value]) => `${key}=${value}`).join(' / ') || '—'}`;
-  engineBadge.title = '引擎口径版本（频谱 / 指标 / 基线 / 评估）';
+  engineBadge.hidden = true;
+  engineBadge.textContent = '';
+  engineBadge.title = `引擎口径：${Object.entries(specs).map(([key, value]) => `${key}=${value}`).join(' / ') || '—'}`;
 
   // 设备徽标：有设备体检数据时显示"在收数 / 已停/掉线 + 实测采样率"，
   // 现场一眼能看出是设备掉了还是信号正常（仿真源直接标注为仿真）

@@ -40,20 +40,25 @@ def _is_sim_outlet(source_id) -> bool:
 
 
 def _lsl_note(descriptor: dict, name: str, srate: float) -> str:
-    """真实设备与内置仿真 outlet 的说明文案分开写（后者必须显式标注是仿真）。"""
+    """数据源说明文案：只写"这是什么"，不写调理链。
+
+    调理口径原来逐行重复在每一条数据源上（界面里同一句话出现 6 遍）——现在统一放在
+    `CONDITION_NOTE` 里，由界面作为表格脚注显示一次，报告里也有「采集调理」行。
+    """
     head = (f"内置仿真 LSL 流（非真实设备，source_id={SIM_OUTLET_SOURCE_ID}）"
             if _is_sim_outlet(descriptor.get("source_id")) else "真实 LSL 流")
     kind = str(descriptor.get("kind") or descriptor.get("stream_type") or "").lower()
-    # 预览是"只接流不等样本"启动的，此时描述符还没解析出来：不要写成"None 通道"，
-    # 如实说"尚未解析到描述符"（等有样本后 status() 会补上采样率与缓冲）。
+    # 预览是"只接流不等样本"启动的，此时描述符还没解析出来：如实说"尚未收到样本"
     if not descriptor.get("channel_count"):
-        return (f"{head}：{name}（尚未解析到描述符：流已可见但还没有样本推送）；"
-                f"有样本后按 {CONDITION_SPEC} 调理：逐通道去直流 → 0.5 Hz 去漂移 → "
-                f"50/60 Hz 陷波 → 45 Hz 低通（零相位）")
-    return (f"{head}（{kind or '未知类型'}）：{name}（{descriptor.get('channel_count')} 通道，"
-            f"{srate:.0f} Hz，标签 {descriptor.get('channel_labels')}）；"
-            f"信号已按 {CONDITION_SPEC} 调理：逐通道去直流 → 0.5 Hz 去漂移 → "
-            f"50/60 Hz 陷波 → 45 Hz 低通（零相位）")
+        return f"{head}：{name}（尚未收到样本）"
+    return (f"{head}（{kind or '未知类型'}）：{name}"
+            f"（{descriptor.get('channel_count')} 通道，{srate:.0f} Hz，"
+            f"标签 {descriptor.get('channel_labels')}）")
+
+
+#: 真机信号调理口径的一句话说明（界面表格脚注 / 报告「采集调理」行共用）。
+CONDITION_NOTE = (f"真实设备信号按 {CONDITION_SPEC} 调理：逐通道去直流 → 0.5 Hz 去漂移 → "
+                  f"50/60 Hz 陷波 → 45 Hz 低通（零相位）")
 
 
 @dataclass
