@@ -334,7 +334,53 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 .step__more > summary:hover { color: var(--text-2); }
 .step__more > .stack { margin-top: 6px; }
 
-/* 全部阶段 = 单列任务清单：一行一个阶段（序号 + 阶段名 + 一句提示 ⋯ 状态） */
+/* 全部阶段 = 一行式步进条：11 个紧凑格子 + 选中阶段的说明面板。
+   原来 11 行清单占 600+px，被试要滚才能看清"我在哪、还剩几步"。 */
+.phase-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  align-items: stretch;
+}
+.phase-item { display: flex; }
+.phase-item__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  max-width: 100%;
+}
+.phase-item__toggle:hover { border-color: var(--line-strong); color: var(--text); }
+.phase-item--done .phase-item__toggle { color: var(--text-3); border-style: dashed; }
+.phase-item--current .phase-item__toggle {
+  color: var(--text);
+  font-weight: 600;
+  border-color: var(--text-2);
+  border-left-width: 3px;
+}
+.phase-item--expanded .phase-item__toggle { border-color: var(--text-2); background: var(--surface-2); }
+.phase-item__index { font-size: 11px; color: var(--text-3); }
+.phase-item__tag { font-size: 11px; color: var(--text-3); }
+.phase-summary { margin: 0 0 8px; }
+
+/* 说明面板：被点开阶段的说明显示在这里，而不是把那一格撑高 */
+.phase-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
 .phase-item__title { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
 .phase-item__label { font-weight: 600; }
 .phase-item__headline { color: var(--text-3); }
@@ -370,46 +416,14 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 .step__action { margin-top: 2px; align-items: center; gap: 10px; }
 
 /* ------------------------------------------------------------ 阶段向导 */
-.phase-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-
-.phase-item {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  overflow: hidden;
-}
-
-.phase-item--current { border-color: var(--line-strong); box-shadow: inset 3px 0 0 var(--text-2); }
-.phase-item[data-state="running"] { border-color: var(--line-strong); }
-.phase-item[data-state="done"] { opacity: .82; }
-.phase-item[data-state="pending"] { opacity: .96; }
-
-/* 整行可点：展开/收起重说明，避免一屏文字抓不到重点 */
-.phase-item__toggle {
-  display: grid;
-  grid-template-columns: 26px 1fr auto;
-  gap: 10px;
-  align-items: center;
-  width: 100%;
-  padding: 8px 10px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.phase-item__toggle:hover { background: var(--surface-2); }
-.phase-item__toggle:focus-visible { outline: 2px solid var(--line-strong); outline-offset: -2px; }
-.phase-item--current .phase-item__toggle { font-weight: 500; }
-.phase-item__main { min-width: 0; }
-.phase-item__index { font-family: var(--mono); color: var(--text-3); }
-.phase-item__label { font-weight: 500; }
-.phase-item__headline { font-weight: 500; }
+/* 注意：步进条（.phase-list / .phase-item / .phase-item__toggle）的样式在上面
+   「全部阶段 = 一行式步进条」那段里定义。这里**不要再写同名规则**——
+   2026-10-07 就是因为在文件后面又留了一段旧规则（flex-direction: column 等），
+   把新的横向步进条覆盖回"一行一个阶段"，白改一轮。
+   下面只保留说明面板里仍在用的文字样式。 */
 .phase-item__desc { color: var(--text-3); font-size: 12px; margin-top: 2px; }
 .phase-item__bullet { color: var(--text-2); font-size: 12px; line-height: 1.8; }
 .phase-item__next { color: var(--text-3); font-size: 12px; margin-top: 2px; }
-.phase-item .right { display: flex; align-items: center; gap: 8px; }
 
 /* ------------------------------------------------------------ 量表答题 */
 /* 一次一题：只有 .scale-item--current 可见，其余题目仍在 DOM（验收按 DOM 断言"20 题全渲染"，
@@ -491,6 +505,10 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
   min-height: 16px;
   font-variant-numeric: tabular-nums;
 }
+
+/* 刺激区可点击作答（鼠标/触屏用户不该被"只能按空格"挡住） */
+.task-stage--clickable { cursor: pointer; }
+.task-stage--clickable:hover { border-color: var(--line-strong); }
 
 /* ------------------------------------------------------------------ 表单 */
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }

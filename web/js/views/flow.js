@@ -134,7 +134,7 @@ export function render(container, ctx) {
     stepHost,
     noticeHost,
     card('全部阶段', phaseHost, {
-      sub: '一行一个阶段：左侧序号与名称，右侧状态；点任意一行展开说明',
+      sub: '共 11 步：✓ 已完成 / 高亮 当前 / 灰 待开始；点任意一步，说明显示在下方',
     }),
     scaleSummaryHost,
     tailHost,
@@ -167,19 +167,18 @@ export function render(container, ctx) {
     container.querySelectorAll('p.muted, .muted').forEach((node) => { node.style.fontSize = '12px'; node.style.margin = '2px 0'; });
     container.querySelectorAll('.stack').forEach((node) => { node.style.gap = '2px'; });
     container.querySelectorAll('.tag-list').forEach((node) => { node.style.gap = '4px'; });
-    // 3) 全部阶段：单列任务清单（一行一个阶段，序号+名称+状态），不再用三列网格——
-    //    三列会把阅读顺序打散、长提示换行后高度参差，用户反馈的"乱"有一部分来自这里。
+    // 3) 全部阶段：一行式步进条（紧凑格子 + 下方说明面板）。间距在 CSS 里，
+    //    这里只做兜底，避免不同浏览器下换行间距不一致。
     const phaseList = container.querySelector('.phase-list');
     if (phaseList) {
       phaseList.style.display = 'flex';
-      phaseList.style.flexDirection = 'column';
-      phaseList.style.gap = '2px';
+      phaseList.style.flexWrap = 'wrap';
+      phaseList.style.gap = '6px';
       phaseList.style.margin = '0';
       phaseList.style.padding = '0';
       phaseList.style.alignItems = 'stretch';
     }
     container.querySelectorAll('.phase-item').forEach((item) => {
-      item.style.padding = '3px 6px';
       item.querySelectorAll('.phase-item__main, .phase-item__main *').forEach((node) => {
         node.style.fontSize = '11.5px';
         node.style.lineHeight = '1.25';
@@ -499,7 +498,10 @@ export function render(container, ctx) {
 
     const meta = [];
     const timing = describeTiming(phase, state);
-    if (timing) meta.push(el('span', { class: 'step__meta-item mono', text: timing }));
+    // 计时节点留引用：1 秒刷新只改这一行，不再重建整张卡（重建会把折叠区合上、
+    // 也会把正在点的按钮换成新节点 → "点了没反应"）
+    const timingNode = el('span', { class: 'step__meta-item mono', text: timing || '' });
+    meta.push(timingNode);
     meta.push(el('span', { class: 'step__meta-item', text: ADVANCE_TEXT[advance] || ADVANCE_TEXT.auto }));
     if (state === 'running' && typeof stageProgress === 'number' && stageProgress !== null) {
       meta.push(el('span', { class: 'step__meta-item mono', text: `本阶段 ${fmtPercent(stageProgress)}` }));
@@ -563,90 +565,146 @@ export function render(container, ctx) {
     if (local.offline) {
       more.push(el('p', { class: 'muted', text: '实时事件流已断开，正在每 10 秒轮询 /api/sessions/{uuid}/live 兜底。' }));
     }
-    body.push(el('details', { class: 'step__more' }, [
+    // 折叠区状态跨重建保留：SSE 事件与阶段切换都会重建这张卡，不记住 open 就会
+    // "点开一秒后又自己合上"（用户反馈的"本阶段要做什么无法正常展开"）。
+    const moreBox = el('details', { class: 'step__more' }, [
       el('summary', { text: '本阶段要做什么 / 会话信息' }),
       el('div', { class: 'stack' }, more),
-    ]));
+    ]);
+    moreBox.open = local.stepMoreOpen === true;
+    moreBox.addEventListener('toggle', () => { local.stepMoreOpen = moreBox.open; });
+    body.push(moreBox);
 
+    local.stepKey = key;
+    local.stepTimingNode = timingNode;
     stepHost.append(card('当前阶段', el('div', { class: `step${stateClass}` }, body), {
       sub: '按提示做即可，页面会自动进入下一步',
     }));
   };
 
+  /** 每秒只刷新"已用 / 约剩"那一行；阶段换了才整卡重画。
+   *  这是"折叠区点开就合上 / 按钮点了没反应"的根因修复：原来每秒都重建整张卡。 */
+  const tickStep = () => {
+    if (document.hidden || local.finished) return;
+    local.now = Date.now();
+    const key = currentPhaseKey();
+    if (!local.stepTimingNode || local.stepKey !== key) {
+      renderStep();
+      return;
+    }
+    const phase = local.phaseOrder.find((item) => item.key === key) || { key };
+    const state = (local.phaseState.get(key) || {}).state || 'pending';
+    local.stepTimingNode.textContent = describeTiming(phase, state) || '';
+  };
+
+  /**
+   * 阶段总览：**一行式步进条**（11 个紧凑格子）+ 选中阶段的说明面板。
+   *
+   * 为什么改成这样：原来是 11 行的单列清单（每行名称+提示+状态+时长），在 1000px 高的屏上
+   * 占掉 600+px，被试要滚才能看完"我在哪、还剩几步"。现在整条步进条只占 2 行左右，
+   * "当前在哪一步 / 已完成几步"一眼可见；点任意格子，说明显示在下面的**同一块面板**里，
+   * 而不是把那一行撑高（行高参差会让整块看着乱）。
+   *
+   * 兼容既有验收：仍然渲染 11 个 `.phase-item`（每个内部一个 `.phase-item__toggle`），
+   * 当前阶段带 `--current`、被点开的带 `--expanded`，非展开项仍是自适应高度（无拉伸留白）。
+   */
   const renderPhases = () => {
     phaseHost.textContent = '';
     const current = currentPhaseKey();
     const listNode = el('ul', { class: 'phase-list' });
+    const scale = Number(pick(ctx.store.state.currentSession, 'time_scale', 1)) || 1;
+    const labelOf = (key) => {
+      const found = local.phaseOrder.find((item) => item.key === key);
+      return (found && found.label) || key;
+    };
+    let doneCount = 0;
+    let currentIndex = -1;
+
     local.phaseOrder.forEach((phase, index) => {
       const state = local.phaseState.get(phase.key) || { state: 'pending', progress: null };
       const interactive = pick(phase, 'interactive', false);
       const isCurrent = !local.finished && phase.key === current;
-      // 默认全部收起：原来"当前阶段"一行会自动展开一堆说明，整列高度参差、重点被文字淹没；
-      // 现在每行固定一行的"阶段名 + 一句提示 + 状态"，说明要点进（渐进披露）。
       const expanded = local.expandedPhase === phase.key;
-      const duration = Number(pick(phase, 'duration_sec', 0)) || 0;
-      const scale = Number(pick(ctx.store.state.currentSession, 'time_scale', 1)) || 1;
+      if (state.state === 'done') doneCount += 1;
+      if (isCurrent) currentIndex = index;
       const mark = state.state === 'done' ? '✓' : String(index + 1).padStart(2, '0');
-
-      // 第一行永远是"序号 + 阶段名 + 一句提示"：原来只显示提示、没有阶段名，用户看不出这是哪一步
-      const detail = [
-        el('div', { class: 'phase-item__title' }, [
-          el('span', { class: 'phase-item__label', text: pick(phase, 'label', phase.key) }),
-          pick(phase, 'headline', null)
-            ? el('span', { class: 'phase-item__headline', text: pick(phase, 'headline') })
-            : null,
-        ]),
-      ];
-      if (expanded) {
-        if (pick(phase, 'description', null)) {
-          detail.push(el('div', { class: 'phase-item__desc', text: pick(phase, 'description') }));
-        }
-        for (const item of list(pick(phase, 'details', []))) {
-          detail.push(el('div', { class: 'phase-item__bullet', text: `· ${item}` }));
-        }
-        if (pick(phase, 'next_hint', null)) {
-          detail.push(el('div', { class: 'phase-item__next', text: `之后：${pick(phase, 'next_hint')}` }));
-        }
-      }
-
-      const meta = [];
-      if (duration) {
-        const shown = duration * scale;
-        meta.push(el('span', { class: 'muted mono', text: scale < 0.2 && scale !== 1
-          ? `约 ${fmtSeconds(shown, 0)}（快速）` : `约 ${fmtSeconds(duration, 0)}` }));
-      }
-      if (state.progress !== null && state.progress !== undefined && state.state === 'running') {
-        meta.push(el('span', { class: 'mono muted', text: fmtPercent(state.progress) }));
-      }
+      const duration = Number(pick(phase, 'duration_sec', 0)) || 0;
 
       const item = el('li', {
         class: 'phase-item'
           + (isCurrent ? ' phase-item--current' : '')
+          + (state.state === 'done' ? ' phase-item--done' : '')
           + (expanded ? ' phase-item--expanded' : ''),
         dataset: { state: state.state },
       }, [
         el('button', {
           class: 'phase-item__toggle',
           type: 'button',
-          title: expanded ? '收起说明' : '展开该阶段说明',
+          title: `${pick(phase, 'label', phase.key)}｜${expanded ? '收起说明' : '展开说明'}`,
+          attrs: { 'aria-label': `第 ${index + 1} 步 ${pick(phase, 'label', phase.key)}（${phaseStateText(state.state)}）` },
           onClick: () => {
             local.expandedPhase = expanded ? null : phase.key;
             renderPhases();
           },
         }, [
           el('span', { class: 'phase-item__index mono', text: mark }),
-          el('div', { class: 'phase-item__main' }, detail),
-          el('div', { class: 'right' }, [
-            interactive ? el('span', { class: 'tag', text: INTERACTIVE_KEY[phase.key] || '需交互' }) : null,
-            el('span', { class: 'badge' + (state.state === 'running' ? ' badge--strong' : ''),
-                         text: phaseStateText(state.state) }),
-            ...meta,
-          ]),
+          el('span', { class: 'phase-item__label', text: pick(phase, 'label', phase.key) }),
+          interactive ? el('span', { class: 'phase-item__tag', text: '需你作答' }) : null,
         ]),
       ]);
       listNode.append(item);
     });
+
+    // 一条汇总：现在在哪一步、还剩多少（原来要自己数 11 行）
+    const summary = el('p', {
+      class: 'muted phase-summary',
+      text: local.finished
+        ? `全部 ${local.phaseOrder.length} 个阶段已完成`
+        : `已完成 ${doneCount}/${local.phaseOrder.length}｜当前第 ${currentIndex + 1} 步：${labelOf(current || '')}`
+          + (currentIndex >= 0 && currentIndex < local.phaseOrder.length - 1
+            ? `｜下一步：${labelOf(local.phaseOrder[currentIndex + 1].key)}` : ''),
+    });
+
+    phaseHost.append(summary);
     phaseHost.append(listNode);
+
+    // 说明面板：所有阶段的说明都渲染在这里，只有被点开的那一个可见
+    const detailHost = el('div', { class: 'phase-detail' });
+    const picked = local.phaseOrder.find((item) => item.key === local.expandedPhase) || null;
+    if (!picked) {
+      detailHost.append(el('p', {
+        class: 'muted',
+        text: '点上面任意一个阶段，这里会显示它在做什么、要注意什么、大约多久。',
+      }));
+    } else {
+      const state = local.phaseState.get(picked.key) || { state: 'pending', progress: null };
+      const body = [el('div', { class: 'phase-item__title' }, [
+        el('span', { class: 'phase-item__label', text: `${pick(picked, 'label', picked.key)}` }),
+        el('span', { class: 'badge' + (state.state === 'running' ? ' badge--strong' : ''),
+                     text: phaseStateText(state.state) }),
+        state.progress !== null && state.progress !== undefined && state.state === 'running'
+          ? el('span', { class: 'mono muted', text: fmtPercent(state.progress) }) : null,
+      ])];
+      if (pick(picked, 'headline', null)) {
+        body.push(el('div', { class: 'phase-item__headline', text: pick(picked, 'headline') }));
+      }
+      if (pick(picked, 'description', null)) {
+        body.push(el('div', { class: 'phase-item__desc', text: pick(picked, 'description') }));
+      }
+      for (const item of list(pick(picked, 'details', []))) {
+        body.push(el('div', { class: 'phase-item__bullet', text: `· ${item}` }));
+      }
+      if (pick(picked, 'next_hint', null)) {
+        body.push(el('div', { class: 'phase-item__next', text: `之后：${pick(picked, 'next_hint')}` }));
+      }
+      const duration = Number(pick(picked, 'duration_sec', 0)) || 0;
+      if (duration) {
+        body.push(el('div', { class: 'muted mono', text: scale < 0.2 && scale !== 1
+          ? `预计 ${fmtSeconds(duration * scale, 0)}（快速演示）` : `预计 ${fmtSeconds(duration, 0)}` }));
+      }
+      detailHost.append(el('div', { class: 'stack' }, body));
+    }
+    phaseHost.append(detailHost);
   };
 
   const renderNotices = () => {
@@ -896,7 +954,7 @@ export function render(container, ctx) {
     return slot;
   };
 
-  const renderTaskStage = (task, { digit = null, phaseLabel = '', index = null, total = null, hint = '' } = {}) => {
+  const renderTaskStage = (task, { digit = null, phaseLabel = '', index = null, total = null, hint = '', answered = false } = {}) => {
     const slot = ensureTaskSlot(task);
     slot.host.textContent = '';
     const title = task === 'sart' ? 'SART 持续注意任务' : 'PVT-B 警觉度任务';
@@ -909,9 +967,20 @@ export function render(container, ctx) {
       el('p', { class: 'mono', text: `第 ${fmtInt(index)} 试次${total ? ` / ${fmtInt(total)}` : ''}${phaseLabel ? `｜${phaseLabel}` : ''}` }),
       timer,
     ]);
+    // 鼠标/触屏也能作答：原来只有空格键，现场拿鼠标的人"点了没反应"。
+    // 快速演示模式下服务端自动作答，这里不给按钮，避免重复提交。
+    const actions = [];
+    if (!local.auto && !answered) {
+      actions.push(button('点击这里作答（等同按空格）', () => answerCurrent(local.trial), { primary: true, small: true }));
+      stage.addEventListener('click', () => answerCurrent(local.trial));
+      stage.classList.add('task-stage--clickable');
+    }
     slot.host.append(card(title, el('div', {}, [
       stage,
-      el('p', { class: 'muted', text: '键盘：空格作答（页面已阻止空格滚动）；反应时按刺激呈现到按键的 performance.now() 差值（秒）上报。' }),
+      actions.length ? el('div', { class: 'row', style: 'margin-top:10px' }, actions) : null,
+      el('p', { class: 'muted', text: answered
+        ? '本试次已记账，等下一个刺激出现即可。'
+        : '键盘：空格作答（页面已阻止空格滚动）；也可以用鼠标/触屏点击上面的刺激区。反应时按刺激呈现到作答的 performance.now() 差值（秒）上报。' }),
     ])));
     slot.stage = stage;
     slot.timer = timer;
@@ -1001,6 +1070,14 @@ export function render(container, ctx) {
     return Math.max(0.05, elapsed - delay);
   };
 
+  /** 作答当前试次（空格键 / 点击刺激区 / 点「点击作答」按钮都走这里）。 */
+  const answerCurrent = (trial) => {
+    if (!trial || !trial.keyReady || trial.answer) return false;
+    trial.answer = { responded: true, rt: reactionTime(trial) };
+    submitTrial(trial);
+    return true;
+  };
+
   /** 空格作答：仅在 trial 已就绪（本试次已渲染刺激）时接受，杜绝跨试次串答。 */
   const onKeyDown = (event) => {
     if (event.code !== 'Space' && event.key !== ' ') return;
@@ -1008,10 +1085,7 @@ export function render(container, ctx) {
     const tag = (event.target && event.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     event.preventDefault();
-    const trial = local.trial;
-    if (!trial || !trial.keyReady || trial.answer) return;
-    trial.answer = { responded: true, rt: reactionTime(trial) };
-    submitTrial();
+    answerCurrent(local.trial);
   };
   window.addEventListener('keydown', onKeyDown);
   // 视图卸载时摘掉监听，避免其它视图误触发
@@ -1050,7 +1124,7 @@ export function render(container, ctx) {
         local.trialTicker = null;
         if (!current.answer && !current.posting) {
           current.answer = { responded: false, rt: null };   // 未按键：Go 记漏报、No-Go 记正确抑制
-          submitTrial();
+          submitTrial(current);                              // 传入本次试次：绝不误答刚来的下一试次
         }
         return;
       }
@@ -1061,8 +1135,12 @@ export function render(container, ctx) {
   };
   ctx.onCleanup(clearTrialWindow);
 
-  const submitTrial = async () => {
+  const submitTrial = async (expected) => {
     const trial = local.trial;
+    // expected：窗口到期时把"我当时在答的那一个试次"传进来。若此刻 local.trial 已经是
+    // 新试次，就**什么都不做**——否则会把"未作答"记到刚呈现的新试次头上，新试次随即被标记
+    // 已答/被清空，被试再按空格或点击都没反应（用户反馈的"SART 前一个没答、后一个点不动"）。
+    if (expected && trial !== expected) return;
     if (!trial || !trial.answer || trial.posting) return;
     trial.posting = true;
     trial.keyReady = false;
@@ -1074,6 +1152,7 @@ export function render(container, ctx) {
       total: trial.total,
       phaseLabel: phase === 'practice' ? '练习' : '正式',
       hint: answer.responded ? `已记录：反应时 ${fmtNum(answer.rt, 3)} s` : '本试次未按键',
+      answered: true,
     });
     // 注意顺序：renderTaskStage 会重建舞台（含计时节点），所以结果文本要在它之后写
     paintTimer(trial, answer.responded
@@ -1081,7 +1160,7 @@ export function render(container, ctx) {
       : '本试次未按键（按"未作答/正确抑制"记账）');
     if (local.auto) {
       // 快速模式：后端已自行作答，前端不再 POST（避免重复提交与 409）
-      local.trial = null;
+      if (local.trial === trial) local.trial = null;
       return;
     }
     try {
@@ -1101,7 +1180,10 @@ export function render(container, ctx) {
           rt: answer.responded ? Number(Math.min(answer.rt, 9.999).toFixed(3)) : null,
         });
       }
-      local.trial = null;
+      // **只能清掉"这一次"的试次**：服务端常常在 POST 返回之前就通过 SSE 推来了下一个试次，
+      // 无条件 `local.trial = null` 会把刚到的下一试次抹掉，于是"前一个没答、后一个点不动"
+      // （用户实测就是这个）。带 expected 的调用还要再校验一次身份。
+      if (local.trial === trial) local.trial = null;
     } catch (error) {
       trial.posting = false;
       trial.keyReady = true;
@@ -1587,12 +1669,8 @@ export function render(container, ctx) {
     },
   });
 
-  // 每秒刷新一次"当前该做什么"，让"已用 / 约剩"跟着走（页面不可见时不刷）
-  const ticker = window.setInterval(() => {
-    if (document.hidden || local.finished) return;
-    local.now = Date.now();
-    renderStep();
-  }, 1000);
+  // 每秒刷新一次"已用 / 约剩"（只改那一行，见 tickStep；页面不可见时不刷）
+  const ticker = window.setInterval(tickStep, 1000);
 
   const poller = window.setInterval(() => {
     if (document.hidden) return;
