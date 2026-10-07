@@ -675,8 +675,16 @@ class SessionRuntime:
             rt = round(max(0.18, rng.gauss(0.33, 0.06)), 3) if responded else None
             answer = self._wait_trial("pvt", {"task": "pvt", **nxt}, auto=auto,
                                       fallback={"responded": responded, "rt": rt}, window=window)
+            false_start = schemas_bool(answer.get("false_start"))
             task.submit(index=nxt["index"], responded=schemas_bool(answer.get("responded")),
-                        rt=answer.get("rt"), false_start=schemas_bool(answer.get("false_start")))
+                        rt=answer.get("rt"), false_start=false_start)
+            if false_start:
+                # 抢答留痕：前端在刺激出现前按键会上报 false_start=true，
+                # 服务端把它记到紧接着的那一个试次上（responded=false / rt=null）。
+                self.bus.publish("notice", {
+                    "level": "info",
+                    "message": f"抢答已记账：第 {nxt['index'] + 1} 试次记为抢答（刺激出现前按键，不计入反应时）",
+                })
         result = task.result()
         self._persist_behavior("pvt", result, task.trials_payload())
         return result

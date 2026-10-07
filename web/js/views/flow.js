@@ -456,6 +456,15 @@ export function render(container, ctx) {
     );
   };
 
+  /** 阶段换页时的轻微过渡：把本阶段页淡入一次（用户要求"自动页面 + 轻微过渡动画"）。
+   *  只在阶段键变化时触发，试次级重绘不闪。 */
+  const flashStageEnter = () => {
+    stageHost.classList.remove('flow-stage--enter');
+    void stageHost.offsetWidth;            // 强制回流，动画才会重放
+    stageHost.classList.add('flow-stage--enter');
+    window.setTimeout(() => stageHost.classList.remove('flow-stage--enter'), 420);
+  };
+
   const syncTaskMode = () => {
     const label = taskModeLabel();
     if (label && label !== local.lastTaskLabel) local.forceOverview = false;   // 换任务 → 回本阶段页
@@ -464,6 +473,11 @@ export function render(container, ctx) {
     // 当前阶段不是"量表填写"时，量表作答表单也必须清掉（否则会跟后面的任务同屏）
     const phaseNow = currentPhaseKey();
     if (phaseNow && phaseNow !== 'scales' && local.scales && local.scales.size) clearScaleSlots();
+    // 换阶段 → 本阶段页淡入一次
+    if (phaseNow && phaseNow !== local.lastFlashPhase) {
+      local.lastFlashPhase = phaseNow;
+      flashStageEnter();
+    }
     markTaskCards();
     taskBarHost.classList.add('flow-taskbar--on');       // 细条常显（见 renderTaskBar 注释）
     // 一个阶段一页：默认只显示"本阶段这一页"，总览（11 步步进条 + 汇总 + 尾部）要显式点开。
@@ -1335,19 +1349,47 @@ export function render(container, ctx) {
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     event.preventDefault();
     const current = local.trial;
-    const waitingPvt = taskKey((local.behaviorRequest || {}).task) === 'pvt'
-      && (!current || current.answer || !current.stimulus);
+    // 抢答判定看**渲染出来的 PVT 等待态**，不依赖 behavior_request 事件是否到达
+    // （实测：事件在某些时序下拿不到，判定就漏了；DOM 里的等待态是可靠事实）。
+    const pvtSlot = local.taskSlots && local.taskSlots.get('pvt');
+    const pvtWaiting = Boolean(pvtSlot && pvtSlot.stage
+      && pvtSlot.stage.querySelector('.task-stage__waiting, .task-stage__dot--idle'));
+    const waitingPvt = pvtWaiting || (taskKey((local.behaviorRequest || {}).task) === 'pvt'
+      && (!current || current.answer || !current.stimulus));
     if (waitingPvt) {
-      // 抢答：刺激还没出现就按。**只做现场反馈**——此刻服务端还没在等这个试次，
-      // 提交也没有归属（会 409）；不伪造数据，也不假装服务端已记账。
-      const now = Date.now();
-      if (!local.lastEarlyWarn || now - local.lastEarlyWarn > 1200) {
-        local.lastEarlyWarn = now;
-        toast('抢答：光点还没出现，这一次不计入反应时', 'info');
-      }
+      reportFalseStart();
       return;
     }
     answerCurrent(current);
+  };
+
+  /**
+   * 抢答（刺激还没出现就按）：**真上报**。
+   *
+   * 2026-10-07 用户确认要做成真上报。服务端 `provide_input` 会把作答预置在事件上，
+   * 下一个试次的 `_wait_trial` 立刻消费它 —— 于是该试次被记为
+   * `responded=false, rt=null, false_start=true`（`PvtResult.score()` 里进 `false_starts`）。
+   * 前端只负责：把"下一个试次序号"报上去 + 给现场反馈（不伪造任何反应时）。
+   */
+  const reportFalseStart = () => {
+    const now = Date.now();
+    if (local.lastEarlyWarn && now - local.lastEarlyWarn < 1200) return;   // 防连击刷屏/重复上报
+    local.lastEarlyWarn = now;
+    if (local.auto) {
+      toast('抢答：演示模式下由服务端自动作答，本机按键不计入', 'info');
+      return;
+    }
+    // 下一个试次的 0-based index：优先用舞台上写着的"第 N 试次"（等待态显示的是**刚答完**那一试次，
+    // 所以下一个就是 N），拿不到再用 local.trial.index + 1。**不能瞎报**——服务端会核对 index，
+    // 对不上就按"未作答"记账，抢答反而没了。
+    const stageText = (local.taskSlots && local.taskSlots.get('pvt') && local.taskSlots.get('pvt').stage
+      ? local.taskSlots.get('pvt').stage.textContent : '') || '';
+    const shown = /第\s*([0-9]+)\s*试次/.exec(stageText);
+    const nextIndex = shown ? Number(shown[1])
+      : (local.trial && Number.isFinite(local.trial.index) ? local.trial.index + 1 : 0);
+    api.submitPvtTrial(uuid, { index: nextIndex, responded: false, rt: null, false_start: true })
+      .then(() => toast('抢答已上报：光点还没出现，这一次记为抢答（不计入反应时）', 'info'))
+      .catch((error) => toast(`抢答上报失败：${describeError(error)}`, 'error'));
   };
   window.addEventListener('keydown', onKeyDown);
   // 视图卸载时摘掉监听，避免其它视图误触发

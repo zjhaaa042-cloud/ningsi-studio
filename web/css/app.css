@@ -332,6 +332,15 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 .flow--stage .flow-stage { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 2px; }
 .flow--stage .flow-overview { display: none; }
 .flow--overview .flow-stage { display: none; }
+/* 换阶段时本阶段页淡入一次（轻微过渡，不占作答窗口：420ms 内完成） */
+@keyframes flow-stage-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.flow-stage--enter { animation: flow-stage-enter .4s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .flow-stage--enter { animation: none; }   /* 跟随系统"减少动态效果"设置 */
+}
 
 /* 当前阶段卡：一条细进度 + 阶段名 + 一句该做什么 + 唯一主按钮，其余进折叠区。
    设计依据：GOV.UK 任务清单模式（长流程用"步骤 + 状态"表达，页面只留一个主行动）
