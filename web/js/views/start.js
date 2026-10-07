@@ -24,7 +24,7 @@ const STEPS = [
 ];
 
 const local = { step: 0, subject: null, device: '', scale: 1.0, mode: 'quick', label: '',
-                previewBuilt: false, previewHost: null };
+                filter: '', previewBuilt: false, previewHost: null };
 
 const SCALE_CHOICES = [
   { value: 1.0, title: '真实节奏', note: '约 25–30 分钟；量表、SART、PVT 都由被测者本人作答（正式检测用这个）' },
@@ -134,8 +134,32 @@ export async function render(container, ctx) {
   const paintSubjectStep = () => {
     const host2 = el('div', { class: 'stack' });
     if (subjects.length) {
-      const listHost = el('div', { class: 'pick-list' });
-      for (const item of subjects.slice(0, 60)) {
+      const keyword = (local.filter || '').trim().toLowerCase();
+      const matched = keyword
+        ? subjects.filter((item) => (`sub-${pick(item, 'public_id', '')} ${pick(item, 'label', '') || ''}`)
+          .toLowerCase().includes(keyword))
+        : subjects;
+      // 被试多的时候（开发库里常有上百个）必须能筛：否则一屏几十个格子谁也找不到人
+      if (subjects.length > 12) {
+        const filterInput = el('input', {
+          id: 'wizard-subject-filter', type: 'search', placeholder: '按编号或别名筛选，例如 p03 / 张三',
+          value: local.filter || '',
+        });
+        filterInput.addEventListener('input', () => { local.filter = filterInput.value; paint(); });
+        host2.append(el('div', { class: 'form-grid' }, [
+          field(`筛选被试（共 ${fmtInt(subjects.length)} 位）`, filterInput, '输入编号或别名的一部分即可'),
+        ]));
+        // 重绘后恢复焦点与光标：否则每输一个字符光标就丢
+        queueMicrotask(() => {
+          const again = host2.querySelector('#wizard-subject-filter');
+          if (again && local.filter !== null && document.activeElement !== again) {
+            again.focus();
+            again.setSelectionRange(again.value.length, again.value.length);
+          }
+        });
+      }
+      const listHost = el('div', { class: 'pick-list pick-list--scroll' });
+      for (const item of matched.slice(0, 200)) {
         const id = pick(item, 'public_id', '');
         const label = pick(item, 'label', null);
         listHost.append(el('button', {
@@ -147,13 +171,19 @@ export async function render(container, ctx) {
           el('span', { class: 'pick__note', text: label || '（无别名）' }),
         ]));
       }
-      host2.append(el('p', { class: 'muted', text: `已有 ${fmtInt(subjects.length)} 位被试，点一个选中；没有合适的就在下面新建。` }));
+      host2.append(el('p', { class: 'muted', text: matched.length
+        ? `点一个选中（当前显示 ${fmtInt(matched.length)} 位）；没有合适的就在下面新建。`
+        : '没有匹配的被试：清空筛选，或在下面新建。' }));
       host2.append(listHost);
     } else {
       host2.append(empty('还没有被试：在下面填一个别名（编号可留空自动生成）即可开始。'));
     }
 
-    // 新建被试：只问必要的一件事（别名），编号/同意版本走默认值
+    // 新建被试：主要动作是"选已有"，新建是次要动作 —— 收进折叠，避免表单把卡片撑高
+    const details = el('details', { class: 'wizard__others' });
+    if (!subjects.length) details.open = true;
+    details.append(el('summary', { text: subjects.length ? '没有合适的？点这里新建一位被试' : '新建一位被试' }));
+    // 只问必要的一件事（别名），编号/同意版本走默认值
     const labelInput = el('input', { id: 'wizard-subject-label', type: 'text', placeholder: '例如：张三 / 演示被试' });
     const idInput = el('input', { id: 'wizard-subject-id', type: 'text', placeholder: '留空自动生成', maxlength: 8 });
     const createBtn = button('新建并选中', async () => {
@@ -183,12 +213,12 @@ export async function render(container, ctx) {
         createBtn.textContent = '新建并选中';
       }
     }, { primary: true, small: true });
-    host2.append(el('hr', { class: 'wizard__sep' }));
-    host2.append(el('div', { class: 'form-grid' }, [
+    details.append(el('div', { class: 'form-grid' }, [
       field('别名（必填其一）', labelInput, '只在本机用于区分，写昵称即可'),
       field('编号（可留空）', idInput, '留空按 p01、p02… 自动生成'),
     ]));
-    host2.append(el('div', { class: 'row' }, [createBtn]));
+    details.append(el('div', { class: 'row' }, [createBtn]));
+    host2.append(details);
     return host2;
   };
 

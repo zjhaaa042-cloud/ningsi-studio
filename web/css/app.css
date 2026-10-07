@@ -574,6 +574,8 @@ body.subject-mode .view { padding: 10px 16px 28px; }
 
 /* 大块单选（被试/设备/节奏都用它，点一下即选中） */
 .pick-list { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 候选很多时（开发库里常有上百位被试）区域滚动，别把卡片撑成一面墙 */
+.pick-list--scroll { max-height: 300px; overflow-y: auto; }
 .pick {
   display: flex;
   flex-direction: column;
