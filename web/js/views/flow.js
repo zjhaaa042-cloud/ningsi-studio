@@ -461,6 +461,9 @@ export function render(container, ctx) {
     if (label && label !== local.lastTaskLabel) local.forceOverview = false;   // 换任务 → 回本阶段页
     local.lastTaskLabel = label;
     if (!label) clearTaskStage(null);   // 离开量表/SART/PVT：舞台卡不该留在页面上
+    // 当前阶段不是"量表填写"时，量表作答表单也必须清掉（否则会跟后面的任务同屏）
+    const phaseNow = currentPhaseKey();
+    if (phaseNow && phaseNow !== 'scales' && local.scales && local.scales.size) clearScaleSlots();
     markTaskCards();
     taskBarHost.classList.add('flow-taskbar--on');       // 细条常显（见 renderTaskBar 注释）
     // 一个阶段一页：默认只显示"本阶段这一页"，总览（11 步步进条 + 汇总 + 尾部）要显式点开。
@@ -904,6 +907,20 @@ export function render(container, ctx) {
       })),
       el('p', { class: 'muted', text: '量表结果仅用于研究与自我调节参考，不构成医学诊断。' }),
     ]), { sub: '粗分 / 标准分 / 程度由后端计分' }));
+  };
+
+  /**
+   * 清掉量表作答区。
+   *
+   * 2026-10-07：一个阶段一页之后，量表阶段结束（进入 SART/PVT）时作答表单还留在页面上，
+   * PVT 阶段同屏能看到「第 1/20 题 … 提交 SDS」——既占地方又让人以为还要答题。
+   * 判断依据用**当前阶段键**，而不是"是否收到 scales 事件"，这样中途打开/恢复也不会漏。
+   */
+  const clearScaleSlots = () => {
+    for (const [code, slot] of local.scales) {
+      slot.host.textContent = '';
+      local.scales.delete(code);
+    }
   };
 
   const ensureScaleSlot = (code, label, size, instruction) => {
@@ -1834,12 +1851,14 @@ export function render(container, ctx) {
     }
     refresh();
   };
-  /** 用已加载的引导字段（若有）补齐给定阶段表的说明文案，**不改阶段集合**。 */
+  /** 用已加载的引导字段（若有）补齐给定阶段表的说明文案，**不改阶段集合与协议数字**。
+   *  合并顺序 `{...guide, ...phase}`：会话自己的行优先（短协议的 `duration_sec` 是 24s 而不是
+   *  完整协议的 180s×倍率），config 只补会话行缺的字段（兜底表没有 headline/why 时）。 */
   const mergeGuidance = (rows) => {
     const byKey = new Map(list(local.guidance).map((row) => [pick(row, 'key'), row]));
     return list(rows).map((phase) => {
       const guide = byKey.get(pick(phase, 'key'));
-      return guide ? { ...phase, ...guide } : phase;
+      return guide ? { ...guide, ...phase } : phase;
     });
   };
   const ensurePhaseGuidance = async () => {
