@@ -138,6 +138,19 @@ class UtilDomTest(StudioTestCase):
         self.assertTrue(result["disabledDisabled"])
         self.assertIn("btn--primary", result["enabledClass"])
 
+    def test_reaction_clock_ignores_previous_trial_wait(self):
+        import re
+        source = (ROOT / "web/js/views/flow.js").read_text(encoding="utf-8")
+        function = re.search(r"const reactionTime = \(trial\) => \{.*?\n  \};", source, re.S).group()
+        result = self.run_util(function + """
+            const original = performance.now;
+            Object.defineProperty(performance, 'now', {value: () => 10420, configurable: true});
+            const rt = reactionTime({onset: 10000, delay: 3});
+            Object.defineProperty(performance, 'now', {value: original, configurable: true});
+            return {rt};
+        """)
+        self.assertAlmostEqual(result["rt"], 0.42)
+
     def test_el_boolean_and_property_assignment(self) -> None:
         """el() 的布尔属性与普通属性语义。"""
         result = self.run_util("""

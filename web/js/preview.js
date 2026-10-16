@@ -20,7 +20,7 @@ const POLL_MS = 1200;
  * @param {object} ctx 视图上下文（用 ctx.signal.aborted 判断卸载）
  * @param {HTMLElement} host 容器
  */
-export function renderPreviewCard(ctx, host) {
+export function renderPreviewCard(ctx, host, options = {}) {
   const statusLine = el('p', { class: 'muted', text: '正在探测设备…' });
   const deviceLine = el('p', { class: 'mono', text: '' });
   const qualityLine = el('p', { class: 'muted', text: '' });
@@ -28,6 +28,8 @@ export function renderPreviewCard(ctx, host) {
   const actionHost = el('div', { class: 'row', style: 'margin:10px 0' });
   let timer = null;
   let running = false;
+  let busy = false;
+  const selectedSource = () => options.getSource ? options.getSource() : null;
 
   const stopPolling = () => {
     if (timer !== null) {
@@ -38,6 +40,12 @@ export function renderPreviewCard(ctx, host) {
   ctx.onCleanup(stopPolling);
 
   const paint = (payload) => {
+    const selected = selectedSource();
+    if (options.getSource && payload && payload.active && payload.source !== selected) {
+      statusLine.textContent = '当前预览与所选设备不同，请点击“预览所选设备”重新确认。';
+      waveHost.textContent = ''; qualityLine.textContent = ''; deviceLine.textContent = '';
+      return;
+    }
     const active = payload && payload.active === true;
     const noSignal = !active || payload.no_signal === true;
     if (!active) {
@@ -115,6 +123,8 @@ export function renderPreviewCard(ctx, host) {
   };
 
   const start = async (source) => {
+    if (busy) return;
+    busy = true; renderActions();
     statusLine.textContent = '正在启动预览…';
     try {
       const response = await api.startDevicePreview(source);
@@ -128,8 +138,11 @@ export function renderPreviewCard(ctx, host) {
     } catch (error) {
       // 没有实时信号时后端返回 409 与接入指引，直接展示给现场
       statusLine.textContent = error && error.message ? error.message : String(error);
+      if (ctx.signal.aborted) return;
       running = false;
-      renderActions();
+    } finally {
+      busy = false;
+      if (!ctx.signal.aborted) renderActions();
     }
   };
 
@@ -148,6 +161,12 @@ export function renderPreviewCard(ctx, host) {
 
   const renderActions = () => {
     actionHost.textContent = '';
+    if (options.getSource) {
+      actionHost.append(button(busy ? '正在连接…' : '预览所选设备', () => start(selectedSource()),
+        { primary: true, small: true, disabled: busy || !selectedSource() }));
+      if (running) actionHost.append(button('停止预览', stop, { small: true, disabled: busy }));
+      return;
+    }
     if (running) {
       actionHost.append(
         button('停止预览', stop, { small: true }),
@@ -171,5 +190,9 @@ export function renderPreviewCard(ctx, host) {
     qualityLine,
   ]), { sub: '只读、不创建会话、不写入数据库' }));
   refresh();
-  return { stopPolling };
+  return { stopPolling, selectionChanged() {
+    stopPolling(); running = false;
+    paint({ active: false, note: selectedSource() ? '设备已选择，请预览确认波形与信号质量。' : '请先选择设备。' });
+    renderActions();
+  } };
 }

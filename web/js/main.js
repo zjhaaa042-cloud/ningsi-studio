@@ -92,6 +92,12 @@ async function renderRoute() {
   app.controller = new AbortController();
   app.route = path;
   highlightNav(path);
+  const navToggle = document.getElementById('nav-toggle');
+  if (navToggle) {
+    navToggle.textContent = `导航 · ${ROUTES.find((item) => item.path === path)?.label || '开始检测'}`;
+    navToggle.setAttribute('aria-expanded', 'false');
+    navToggle.closest('nav').classList.remove('sidenav--open');
+  }
 
   const route = ROUTES.find((item) => item.path === path) || ROUTES[0];
   document.title = `${route.label} · 凝思 Studio`;
@@ -109,11 +115,13 @@ async function renderRoute() {
   };
 
   app.viewContainer.textContent = '';
+  window.scrollTo({ top: 0, behavior: 'instant' });
   try {
     await route.module.render(app.viewContainer, ctx);
   } catch (error) {
     console.error('[main] 视图渲染失败', error);
     app.viewContainer.textContent = '';
+  window.scrollTo({ top: 0, behavior: 'instant' });
     app.viewContainer.append(el('p', { class: 'empty', text: `视图渲染失败：${describeError(error)}` }));
     toast(describeError(error));
   }
@@ -121,11 +129,30 @@ async function renderRoute() {
 
 /* ------------------------------------------------------------------ 导航 */
 
+const NAV_PATHS = [
+  'M8 5l11 7-11 7z', 'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
+  'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M17 4a4 4 0 0 1 0 8 M22 21v-2a4 4 0 0 0-3-4',
+  'M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01',
+  'M2 12h5l3-8 4 16 3-8h5',
+  'M12 3v3 M12 18v3 M3 12h3 M18 12h3 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8',
+  'M3 3v18h18 M7 14l4-4 4 3 6-8',
+  'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M8 13h8 M8 17h5',
+  'M9 3h6v6H9z M3 15h6v6H3z M15 15h6v6h-6z M12 9v3 M6 15v-3h12v3',
+  'M8 2h8v20H8z M11 5h2 M11 18h2 M3 9v6 M21 9v6',
+];
+function navIcon(index) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': 1.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', class: 'nav-icon', 'aria-hidden': 'true' })) svg.setAttribute(key, value);
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', NAV_PATHS[index]); svg.append(path); return svg;
+}
+
 function renderNav() {
   app.navList.textContent = '';
-  for (const route of ROUTES) {
+  for (const [index, route] of ROUTES.entries()) {
     app.navList.append(el('li', {}, [
-      el('a', { class: 'sidenav__link', href: route.path, text: route.label }),
+      el('a', { class: 'sidenav__link', href: route.path }, [navIcon(index), el('span', { text: route.label })]),
     ]));
   }
 }
@@ -180,6 +207,7 @@ function updateHeader() {
   const noSignal = !effectiveKind && !deviceKey && !session.uuid;
   const label = noSignal ? '数据来源：无信号' : sourceText(kind, note, deviceKey);
   sourceBadge.textContent = label;
+  sourceBadge.dataset.kind = effectiveKind || 'none';
   sourceBadge.title = noSignal
     ? '未检测到 LSL 脑电信号。请到「设备状态」页启动采集端后重试；仅演示时可在建会话时显式选择仿真源 sim-bsense'
     : (note || '数据来源标注（仿真数据会在界面与报告中显式标注）');
@@ -284,6 +312,12 @@ function boot() {
     return;
   }
   renderNav();
+  const navToggle = document.getElementById('nav-toggle');
+  navToggle?.addEventListener('click', () => {
+    const open = navToggle.getAttribute('aria-expanded') !== 'true';
+    navToggle.setAttribute('aria-expanded', String(open));
+    navToggle.closest('nav').classList.toggle('sidenav--open', open);
+  });
 
   store.subscribe(['health', 'config', 'currentSession', 'sessionRuntime', 'deviceStatus'],
     updateHeader);

@@ -167,7 +167,7 @@ class SessionRuntime:
             if event is None:
                 event = threading.Event()
                 self._input_events[name] = event
-            elif not event.is_set() and name in self._input_payload:
+            elif name in self._input_payload:
                 return False                       # 已有待消费作答，避免静默覆盖
             self._input_payload[name] = payload or {}
             event.set()
@@ -333,6 +333,9 @@ class SessionRuntime:
         """推送一窗结果。总进度由 `_progress()` 按窗序号推进，这里不再重复计算。"""
         payload = step.payload(include_signal=include_signal)
         payload["phase"] = phase
+        payload["source_kind"] = self.source.kind
+        if self.source.kind == "lsl":
+            payload["state"] = "unknown"  # 采集指令不是被试真实状态标签
         self.bus.publish("window", payload)
         try:
             with store.connect(self.db_path) as conn:
@@ -377,7 +380,9 @@ class SessionRuntime:
             "engine_versions": {"spectrum": config.SPECTRUM_SPEC,
                                 "indicator": config.INDICATOR_SPEC,
                                 "baseline": config.BASELINE_SPEC,
-                                "assessment": config.LABEL_SPEC},
+                                "assessment": config.LABEL_SPEC,
+                                    "preprocess": "preprocess-v2",
+                                    "training": "neurofeedback-v2"},
         })
         if self.source.kind != "lsl":
             self.bus.publish("notice", {
@@ -409,6 +414,15 @@ class SessionRuntime:
         ):
             with self._phase(key) as context:
                 baseline, steps = self._collect_baseline(state, seconds, key)
+                if key == "baseline_open" and not baseline.valid:
+                    self.bus.publish("notice", {"level": "warning", "message":
+                        "睁眼基线有效窗不足，追加 30 秒采集。请保持睁眼、放松并检查电极接触。"})
+                    _, extra = self._collect_baseline(state, 30.0, key, progress=False)
+                    steps.extend(extra)
+                    from ningsi.signal.baseline import build_baseline
+                    baseline = build_baseline([step.window for step in steps if step.window is not None],
+                                              device=self.source.device, srate=self.source.srate,
+                                              min_windows=config.BASELINE_PROTOCOL["min_windows"])
                 baselines[key] = baseline
                 payload = baseline.as_dict()
                 self._merge_run_payload(context["run_id"], {
@@ -419,7 +433,12 @@ class SessionRuntime:
                                               "baseline": payload})
                 self._persist_summary_metrics(self.engine.summarize(steps), phase=key)
         self.baselines = baselines
-        baseline = baselines.get("baseline_open") or baselines.get("baseline_closed")
+        # Task scores require the eyes-open reference; a closed-eyes reference
+        # changes the meaning of alpha ratios and must not silently replace it.
+        baseline = baselines.get("baseline_open")
+        if baseline is None or not baseline.valid:
+            self.bus.publish("notice", {"level": "warning", "message":
+                "睁眼基线仍不合格：保留脑电波形和频带功率，暂停个体评分。请检查电极后重新采集会话。"})
         self.engine.baseline = baseline
 
         # 3) 量表
@@ -506,7 +525,7 @@ class SessionRuntime:
         """本次会话的产物目录：<data>/runs/<uuid>/。"""
         return Path(self.settings.runs_root) / self.uuid
 
-    def _collect_baseline(self, state: str, seconds: float, key: str):
+    def _collect_baseline(self, state: str, seconds: float, key: str, *, progress: bool = True):
         """按时间倍率逐窗采集静息基线；返回 (Baseline, steps)。"""
         total = max(1, int(round(float(seconds) / config.STEP_SEC)))
         steps = []
@@ -515,7 +534,7 @@ class SessionRuntime:
             step = self.engine.step(state)
             steps.append(step)
             self._publish_window(step, phase=key, include_signal=(index % 5 == 0))
-            if index % 5 == 0:
+            if progress and index % 5 == 0:
                 self._progress(key, (index + 1) / total, windows_done=index + 1, windows_total=total)
             self._sleep(config.STEP_SEC)
         windows = [step.window for step in steps if step.window is not None]
@@ -659,13 +678,15 @@ class SessionRuntime:
         # 于是 PVT 阶段一开始渲染出一张 **SART** 卡（实测：用户反馈"PVT-B 的刺激是什么？我没看到"）。
         self.bus.publish("behavior_request", {**payload, "task": "pvt"})
         rng = random.Random(f"auto-pvt-{self.uuid}")
-        previous = 0.0
+        started_at = time.monotonic()
         onsets = list(payload["onsets"])
         for position, onset in enumerate(onsets):
             self._check_cancel()
             if not auto:
-                self._sleep(max(0.0, onset - previous))
-            previous = onset
+                # Schedule against task start; response time must not accumulate
+                # into the next foreperiod and lengthen the PVT protocol.
+                elapsed = (time.monotonic() - started_at) / self.scale
+                self._sleep(max(0.0, onset - elapsed))
             nxt = task.next_trial()
             # PVT 的作答窗口 = 到下一个刺激的间隔（标准 PVT：可答到下一个刺激出现为止），
             # 留 0.3s 余量避免与下一次 trial 事件抢跑；最后一个试次用固定窗口。
@@ -724,12 +745,14 @@ class SessionRuntime:
         self.bus.publish("training_start", describe)
         self._progress("training", 0.0, segments_total=describe["segments"])
         wall_segment = max(4.0, float(describe["segment_sec"]) * self.scale)
+        max_windows = max(1, int(round(float(describe["segment_sec"]) / config.STEP_SEC)))
+        interval = wall_segment / max_windows
         for index in range(int(describe["segments"])):
             self._check_cancel()
             states = ("focused", "drowsy")
             deadline = time.time() + wall_segment
             step_index = 0
-            while time.time() < deadline:
+            while time.time() < deadline and step_index < max_windows:
                 step = self.engine.step(states[index % len(states)])
                 step_index += 1
                 score = step.focus
@@ -741,14 +764,17 @@ class SessionRuntime:
                     "on_target": bool(score is not None and score >= trainer.target),
                     "usable": step.usable,
                     "t": round(step.t_end, 3),
+                    **trainer.feedback_status(),
                 })
-                self._sleep(config.STEP_SEC)
+                self._sleep_real(interval)
             segment = trainer.close_segment()
             self._persist_training_segment(segment)
             self.bus.publish("segment", segment)
             self._progress("training", (index + 1) / max(1, describe["segments"]),
                            segments_done=index + 1, segments_total=describe["segments"])
-        summary = trainer.summary(self.engine, seconds_after=30.0)
+        self.bus.publish("notice", {"level": "info", "message": "训练结束，请静息30秒，正在采集训练后基线。"})
+        baseline_after, _ = self._collect_baseline("rest", 30.0, "training", progress=False)
+        summary = trainer.summary(self.engine, baseline_after=baseline_after)
         summary["describe"] = describe
         return summary
 
@@ -815,7 +841,9 @@ class SessionRuntime:
                 "engine_versions": {"spectrum": config.SPECTRUM_SPEC,
                                     "indicator": config.INDICATOR_SPEC,
                                     "baseline": config.BASELINE_SPEC,
-                                    "assessment": config.LABEL_SPEC},
+                                    "assessment": config.LABEL_SPEC,
+                                    "preprocess": "preprocess-v2",
+                                    "training": "neurofeedback-v2"},
             },
         )
         paths = assessment_domain.write_report(report, reports, stem)
@@ -924,7 +952,11 @@ class SessionRuntime:
             "srate": self.source.srate,
             "channels": self.source.channels,
             "indicators": {name: stat.get("mean") for name, stat in (monitor["summary"] or {}).items()},
-            "quality": {"valid_ratio": monitor["quality"].get("valid_ratio"), "passed": True},
+            "protocol": self.protocol,
+            "quality": {"valid_ratio": monitor["quality"].get("valid_ratio"),
+                        "passed": bool((monitor["quality"].get("valid_ratio") or 0) >= config.ASSESS["min_valid_ratio"]
+                                       and self.baselines.get("baseline_open") is not None
+                                       and self.baselines["baseline_open"].valid)},
             "behavior": {"sart_rt_mean": sart_result.get("rt_mean"),
                          "pvt_rt_median": pvt_result.get("rt_median")},
             "assessment": {"conclusion": assessment_result.conclusion},
@@ -983,6 +1015,7 @@ class SessionManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._runtimes: dict[str, SessionRuntime] = {}
+        self._starting: set[str] = set()
         self._lock = threading.Lock()
 
     def active_uuids(self) -> list[str]:
@@ -992,19 +1025,41 @@ class SessionManager:
     def ensure_capacity(self) -> None:
         """并发上限预检：在落库之前调用，避免 429 留下"没有运行线程的幽灵会话"。"""
         with self._lock:
-            active = sum(1 for runtime in self._runtimes.values() if runtime.alive)
+            active = sum(1 for uuid, runtime in self._runtimes.items()
+                         if uuid in self._starting or runtime.alive)
             limit = self.settings.max_active_sessions
         if active >= limit:
             from ningsi_studio.http.router import TooManyRequests
             raise TooManyRequests(f"同时运行的会话已达上限（{limit} 个），请稍后再试")
 
     def start(self, session_uuid: str) -> SessionRuntime:
-        self.ensure_capacity()
+        from ningsi_studio.http.router import Conflict, TooManyRequests
+
+        # Reserve a slot while holding the lock. Source loading can block before
+        # the worker becomes alive, so checking alive alone admits extra starts.
         with self._lock:
+            existing = self._runtimes.get(session_uuid)
+            if session_uuid in self._starting or (existing is not None and existing.alive):
+                raise Conflict("该会话已在启动或运行中")
+            active = sum(1 for uuid, item in self._runtimes.items()
+                         if uuid in self._starting or item.alive)
+            if active >= self.settings.max_active_sessions:
+                raise TooManyRequests(
+                    f"同时运行的会话已达上限（{self.settings.max_active_sessions} 个），请稍后再试")
             bus = EventBus(session_uuid)
             runtime = SessionRuntime(session_uuid, settings=self.settings, bus=bus)
             self._runtimes[session_uuid] = runtime
-        runtime.start()
+            self._starting.add(session_uuid)
+        try:
+            runtime.start()
+        except Exception:
+            with self._lock:
+                if self._runtimes.get(session_uuid) is runtime:
+                    self._runtimes.pop(session_uuid, None)
+            raise
+        finally:
+            with self._lock:
+                self._starting.discard(session_uuid)
         return runtime
 
     def start_with_rollback(self, session_uuid: str, on_failure) -> SessionRuntime:

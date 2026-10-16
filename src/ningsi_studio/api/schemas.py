@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -31,18 +32,20 @@ def require_fields(payload: dict, *fields: str) -> None:
 
 
 def normalize_public_id(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValidationError("被试编号必须是字符串", detail=value)
     text = (value or "").strip()
     if not text:
         raise ValidationError("被试编号不能为空")
     if text.startswith("sub-"):
         text = text[4:]
-    if not PUBLIC_ID_RE.match(text):
+    if text.startswith("sub-") or not PUBLIC_ID_RE.fullmatch(text):
         raise ValidationError("被试编号格式应为 p01 / sub-p01（字母 + 数字，最长 8 位）", detail=text)
     return text
 
 
 def ensure_uuid(value: str) -> str:
-    if not value or not UUID_RE.match(value):
+    if not isinstance(value, str) or not UUID_RE.fullmatch(value):
         raise ValidationError("会话 id 必须是 32 位十六进制字符串", detail=value)
     return value
 
@@ -51,10 +54,12 @@ def clamp_float(value, default: float, *, low: float, high: float, name: str) ->
     if value in (None, ""):
         return default
     try:
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a number")
         number = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValidationError(f"{name} 必须是数字", detail=value) from exc
-    if number < low or number > high:
+    if not math.isfinite(number) or number < low or number > high:
         raise ValidationError(f"{name} 应在 [{low}, {high}] 之间", detail=value)
     return number
 
@@ -63,8 +68,10 @@ def clamp_int(value, default: int, *, low: int, high: int, name: str) -> int:
     if value in (None, ""):
         return default
     try:
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            raise ValueError("expected an integer")
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValidationError(f"{name} 必须是整数", detail=value) from exc
     if number < low or number > high:
         raise ValidationError(f"{name} 应在 [{low}, {high}] 之间", detail=value)

@@ -57,6 +57,28 @@ class PvtFalseStartMechanismTests(unittest.TestCase):
         self.assertTrue(answer.get("responded"))
         self.assertAlmostEqual(float(answer.get("rt")), 0.42, places=3)
 
+    def test_trial_schedule_does_not_accumulate_response_time(self):
+        from unittest.mock import patch
+        runtime = self.runtime
+        runtime.session = {"time_scale": 1}
+        runtime.profile = {"pvt_duration_sec": 12}
+        clock = [100.0]
+        presented = []
+        def sleep(seconds):
+            clock[0] += seconds
+        def answer(*args, **kwargs):
+            presented.append(clock[0] - 100)
+            clock[0] += 0.42
+            return {"responded": True, "rt": 0.42}
+        runtime._sleep = sleep
+        runtime._wait_trial = answer
+        runtime._persist_behavior = lambda *args: None
+        with patch("ningsi_studio.core.runtime.time.monotonic", side_effect=lambda: clock[0]):
+            runtime._run_pvt(auto=False)
+        self.assertEqual(len(presented), len(runtime.pvt_task.onsets))
+        for actual, planned in zip(presented, runtime.pvt_task.onsets):
+            self.assertAlmostEqual(actual, planned, places=6)
+
     def test_index_mismatch_is_not_counted_as_that_trial(self) -> None:
         """错位作答（前端定时器晚到）按"未作答"记账，不会被算到下一个试次头上。"""
         self.runtime.provide_input("pvt", {"index": 99, "responded": True, "rt": 0.3,

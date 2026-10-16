@@ -15,8 +15,8 @@
 <!-- 顶栏固定：数据来源徽标 / 引擎口径 / 当前会话状态与进度 -->
 <header class="topbar" role="banner">
   <div class="topbar__brand">
-    <span class="topbar__logo" aria-hidden="true">凝</span>
-    <span class="topbar__title">凝思 Studio</span>
+    <span class="topbar__logo" aria-hidden="true">NS</span>
+    <span class="brand-stack"><span class="topbar__title">凝思 Studio</span><span class="brand-caption">EEG / 专注力训练工作台</span></span>
   </div>
   <div class="topbar__meta">
     <span id="source-badge" class="badge" title="数据来源">数据来源：—</span>
@@ -35,7 +35,9 @@
 
 <div class="layout">
   <nav class="sidenav" aria-label="主导航">
+    <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-list">导航 · 开始检测</button>
     <ul id="nav-list" class="sidenav__list"></ul>
+    <a href="./neurofocus/" class="sidenav__link">◉ NeuroFocus · 专注监测台</a>
     <div class="sidenav__foot">
       <p class="muted">结论仅用于研究与自我调节训练，不构成医疗诊断。</p>
     </div>

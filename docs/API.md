@@ -490,3 +490,10 @@ lapse_rate, false_starts, valid`。
    逐试次 `POST`；收到 `phase.done` 或 `finished` 后停止。
 4. 所有数值均已做 NaN/Inf → `null` 处理；前端需容忍 `null`（表示该窗不可用）。
 5. 颜色只用 `config.heatmap_bands` 与 `heatmap.legend` 给的值，不要自造状态色。
+
+### NeuroFocus 接入补充（2026-10-16，向后兼容字段）
+
+- `GET /api/config` 增加 `focus_score.range`、`algorithm_id`、`algorithm_version`、`definition`，来自当前引擎配置，前端不得猜测范围。
+- `GET /api/sessions/{uuid}` 的 `runtime` 增加 `source_note`，用于区分模拟 LSL 与真实 LSL 来源。LSL 传输本身不能证明真实硬件或真人采集。
+- `EventBus.publish` 产生的会话 SSE 事件增加顶层 `emitted_at_ms`，表示服务器发送的 Unix epoch 毫秒，重放保持原值。它不是设备逐样本时间戳；客户端重连后须检查新鲜度。
+- 原 `/signal` 的 `t` 是服务器显示帧时间；只有未抽稀样点可按声明采样率显示窗内相对位置，不能把抽稀后的数组当作原始等间隔采样。

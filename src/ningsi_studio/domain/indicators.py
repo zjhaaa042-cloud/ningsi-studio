@@ -48,6 +48,10 @@ class WindowStep:
             "usable": self.usable,
             "quality": quality,
             "scores": {key: round(value, 4) for key, value in self.scores.items()},
+            "indicator_available": bool(self.scores),
+            "indicator_reason": ("" if self.scores else
+                                 self.indicators.reason if self.indicators is not None else "baseline_pending"),
+            "relative_band_powers": dict(getattr(window, "rel", {}) or {}),
             "index_z": ({k: round(v, 4) for k, v in self.indicators.index_z.items()}
                         if self.indicators is not None and self.indicators.available else {}),
             "band_z": ({k: round(v, 4) for k, v in self.indicators.band_z.items()}
@@ -67,7 +71,8 @@ def _trace(raw, window, max_points: int = 200) -> dict:
         import numpy as np
         data = np.atleast_2d(np.asarray(raw, dtype=float))[0]
         step = max(1, len(data) // max_points)
-        values = [round(float(value), 2) for value in data[::step]][:max_points]
+        values = [round(float(value), 2) if np.isfinite(value) else None
+                  for value in data[::step]][:max_points]
     relative = getattr(window, "rel", None) or {}
     return {
         "srate": round(float(getattr(window, "srate", 250.0)), 2),
@@ -105,9 +110,7 @@ class WindowEngine:
             window = self._unusable_window(raw)
         else:
             window = analyze_window(raw, self.srate, t_end=self.t)
-        indicators = None
-        if window.usable and self.baseline is not None and self.baseline.valid:
-            indicators = compute_indicators(window, self.baseline)
+        indicators = compute_indicators(window, self.baseline)
         events = self.alerts.feed(window, indicators)
         triggered = [event.as_dict() for event in events if event.state == "triggered"]
         self.fired_alerts.extend(triggered)
@@ -128,7 +131,7 @@ class WindowEngine:
         if raw is None:
             return False
         data = np.atleast_2d(np.asarray(raw, dtype=float))
-        return data.shape[1] >= self._min_samples()
+        return data.shape[1] >= self._min_samples() and bool(np.isfinite(data).all())
 
     def _unusable_window(self, raw):
         import numpy as np
@@ -137,6 +140,8 @@ class WindowEngine:
         data = np.atleast_2d(np.asarray(raw, dtype=float)) if raw is not None else np.zeros((1, 0))
         channels = int(data.shape[0]) or 1
         reason = "no_data" if data.shape[1] == 0 else "signal_too_short"
+        if data.size and not np.isfinite(data).all():
+            reason = "non_finite_signal"
         return WindowFeatures(
             t_end=self.t,
             srate=self.srate,

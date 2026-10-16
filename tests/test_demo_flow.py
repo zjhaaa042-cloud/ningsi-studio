@@ -20,6 +20,8 @@ from ningsi import config
 from ningsi.monitoring.heatmap import MISSING_COLOR
 from ningsi_studio import bootstrap
 
+DEMO_TIME_SCALE = 0.01
+
 REQUIRED_ARTIFACTS = ("report_md", "report_json", "heatmap_svg", "trend_svg", "model", "history")
 
 
@@ -34,7 +36,7 @@ class DemoFlowTests(StudioTestCase):
 
         created = self.json_body(
             self.post("/api/sessions", {"participant": participant, "device": "sim-bsense",
-                                        "time_scale": QUICK_TIME_SCALE,
+                                        "time_scale": DEMO_TIME_SCALE,
                                         "training_mode": "quick", "label": "自动化端到端"}),
             201, "创建会话应返回 201")
         session = created["session"]
@@ -117,7 +119,7 @@ class DemoFlowTests(StudioTestCase):
         extras = report["extras"]
         self.assertEqual(extras["device"], "sim-bsense", "报告应标注仿真数据源")
         self.assertEqual(extras["source_kind"], "sim", "数据来源类型应为 sim")
-        self.assertEqual(extras["time_scale"], QUICK_TIME_SCALE, "报告应记录时间倍率")
+        self.assertEqual(extras["time_scale"], DEMO_TIME_SCALE, "报告应记录时间倍率")
         self.assertIn("engine_versions", extras, "报告应记录口径版本")
         self.assertIn("training", extras, "报告应嵌入训练汇总")
         return report
@@ -156,6 +158,8 @@ class DemoFlowTests(StudioTestCase):
                         "samples", "stats"):
                 self.assertIn(key, segment, f"训练分段应含 {key}")
             self.assertIsInstance(segment["samples"], list, "samples 应为数组")
+            self.assertLessEqual(len(segment["samples"]), 60, "极低倍率演示也不能超出120秒训练段的计划窗数")
+            self.assertLessEqual(segment["stats"]["max_hold_sec"], 120.0, "连续保持不得超出段时长")
             self.assertGreaterEqual(segment["on_target_ratio"], 0.0, "达标时间占比不应为负")
             self.assertLessEqual(segment["on_target_ratio"], 1.0, "达标时间占比不应大于 1")
 

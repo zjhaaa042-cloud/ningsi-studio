@@ -28,7 +28,7 @@ const local = { step: 0, subject: null, device: '', scale: 1.0, mode: 'quick', p
 
 const SCALE_CHOICES = [
   { value: 1.0, title: '真实节奏', note: '按真实时间跑；量表、SART、PVT 都由被测者本人作答（正式检测用这个）' },
-  { value: 0.05, title: '快速演示', note: '约 2 分钟；量表与按键任务由服务端自动作答，只看流程与报告（演示/自测用）' },
+  { value: 0.05, title: '快速演示', note: '加速运行；量表与按键任务由服务端自动作答，只看流程与报告（演示/自测用）' },
 ];
 
 // 协议档：完整（默认）与短协议。负担/时长由 /api/config 的 profiles 提供，这里只放标题与"省在哪"。
@@ -48,6 +48,7 @@ function choiceCard(title, note, selected, onPick) {
   return el('button', {
     class: 'choice' + (selected ? ' choice--on' : ''),
     type: 'button',
+    'aria-pressed': String(selected),
     onClick: onPick,
   }, [
     el('span', { class: 'choice__title', text: title }),
@@ -61,53 +62,50 @@ export async function render(container, ctx) {
   container.append(host);
   local.previewBuilt = false;
   local.previewHost = el('div');
+  local.previewController = null;
+  const loading = el('p', { class: 'empty', role: 'status', text: '正在准备被试、设备和检测协议…' });
+  host.append(loading);
 
   const bodyHost = el('div');
   const footHost = el('div', { class: 'row row--between wizard__foot' });
   const stepsHost = el('div', { class: 'wizard__steps' });
 
-  // 被试候选：进页面就取一次（向导里要能"选"或"建"）
-  let subjects = [];
-  try {
-    const response = await api.listSubjects({ limit: 200 });
-    subjects = list(pick(response.data, 'items', []));
-  } catch (error) {
-    if (ctx.signal.aborted) return;
-    subjects = [];
-  }
-  // 设备候选：探测一次（下一步会用到；失败不阻塞，被"0 个"处理）
-  let sources = [];
-  try {
-    const response = await api.devices(1.2);
-    sources = list(pick(response.data, 'sources', []));
-  } catch (error) {
-    sources = [];
-  }
-  // 协议参数（阶段时长、SART/PVT 试次、量表题数）：用于第 3 步如实告诉操作者"要花多久、要动几次手"，
-  // 不在这里写死数字——口径来自 /api/config（引擎常量）。
-  let protocol = {};
-  try {
-    const response = await api.config();
-    protocol = pick(response.data, 'behavior', {}) || {};
-    protocol.phases = list(pick(response.data, 'phases', []));
-    // 协议档也必须带过来：第 3 步的档位卡与负担行都靠它
-    // （第一版漏了这一行，界面"看起来正常"但协议档根本没渲染——探针断言当时太弱没抓到）
-    protocol.profiles = list(pick(response.data, 'profiles', []));
-  } catch (error) {
-    protocol = {};
-  }
+  let submitting = false;
+  let scanning = false;
+  const responses = await Promise.allSettled([
+    api.listSubjects({ limit: 200 }), api.devices(1.2), api.config(),
+  ]);
   if (ctx.signal.aborted) return;
+  loading.remove();
+  const errors = responses.map((result, index) => result.status === 'rejected'
+    ? `${['被试列表', '设备扫描', '协议配置'][index]}：${describeError(result.reason)}` : null).filter(Boolean);
+  let subjects = responses[0].status === 'fulfilled' ? list(pick(responses[0].value.data, 'items', [])) : [];
+  let sources = responses[1].status === 'fulfilled' ? list(pick(responses[1].value.data, 'sources', [])) : [];
+  const configReady = responses[2].status === 'fulfilled';
+  const configData = configReady ? responses[2].value.data : {};
+  const protocol = { ...(pick(configData, 'behavior', {}) || {}),
+    phases: list(pick(configData, 'phases', [])), profiles: list(pick(configData, 'profiles', [])) };
+  if (responses[0].status === 'fulfilled' && !subjects.some((item) => item.public_id === local.subject)) {
+    local.subject = null; local.step = 0;
+  }
 
-  const real = sources.filter((item) => pick(item, 'real')
+  const requestedSubject = ctx.params.get('participant');
+  if (requestedSubject && subjects.some((item) => item.public_id === requestedSubject)) {
+    local.subject = requestedSubject;
+    local.step = 1;
+    local.scale = 1.0;
+  }
+
+  let real = sources.filter((item) => pick(item, 'real')
     && !String(pick(item, 'key', '')).startsWith('unsupported:'));
-  const realDevice = real.find((item) => !pick(item, 'simulated', false)) || real[0] || null;
+  const realDevice = real.find((item) => pick(item, 'is_eeg', false) && !pick(item, 'simulated', false)) || null;
   if (!local.device) local.device = realDevice ? String(pick(realDevice, 'key', '')) : '';
 
   const paintSteps = () => {
     stepsHost.textContent = '';
     STEPS.forEach((step, index) => {
       const state = index < local.step ? 'done' : (index === local.step ? 'now' : 'todo');
-      stepsHost.append(el('div', { class: `wizard__step wizard__step--${state}` }, [
+      stepsHost.append(el('button', { type: 'button', disabled: index >= local.step || submitting, 'aria-current': index === local.step ? 'step' : null, class: `wizard__step wizard__step--${state}`, onClick: () => goto(index) }, [
         el('span', { class: 'wizard__step-no mono', text: state === 'done' ? '✓' : String(index + 1) }),
         el('span', { class: 'wizard__step-title', text: step.title }),
         el('span', { class: 'wizard__step-hint', text: step.hint }),
@@ -116,8 +114,10 @@ export async function render(container, ctx) {
   };
 
   const goto = (step) => {
+    if (submitting) return;
     local.step = Math.max(0, Math.min(STEPS.length - 1, step));
     paint();
+    stepsHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   /**
@@ -129,25 +129,26 @@ export async function render(container, ctx) {
     if (!local.device) return false;
     if (local.device === 'sim-bsense') return true;
     const row = real.find((item) => String(pick(item, 'key', '')) === local.device);
-    if (!row) return true;
+    if (!row) return false;
     return pick(row, 'usable', true) !== false;
   };
 
   const canNext = () => {
+    if (submitting) return false;
     if (local.step === 0) return Boolean(local.subject);
     if (local.step === 1) return deviceIsUsable();
-    return true;
+    return configReady && Boolean(local.subject) && deviceIsUsable();
   };
 
   const paintFoot = () => {
     footHost.textContent = '';
     footHost.append(
       local.step > 0
-        ? button('上一页', () => goto(local.step - 1), { small: true })
+        ? button('上一页', () => goto(local.step - 1), { small: true, disabled: submitting })
         : el('span', { class: 'muted', text: '第 1 步：先确定这次检测记录给谁' }),
       local.step < STEPS.length - 1
-        ? button('下一步', () => goto(local.step + 1), { primary: true, disabled: !canNext() })
-        : button('开始检测', startSession, { primary: true, disabled: !canNext() }),
+        ? button(local.step === 0 ? '下一步：确认设备' : '下一步：确认检测设置', () => goto(local.step + 1), { primary: true, disabled: !canNext() })
+        : button(submitting ? '启动中…' : '开始检测', startSession, { primary: true, disabled: !canNext() }),
     );
   };
 
@@ -163,7 +164,7 @@ export async function render(container, ctx) {
       // 被试多的时候（开发库里常有上百个）必须能筛：否则一屏几十个格子谁也找不到人
       if (subjects.length > 12) {
         const filterInput = el('input', {
-          id: 'wizard-subject-filter', type: 'search', placeholder: '按编号或别名筛选，例如 p03 / 张三',
+          id: 'wizard-subject-filter', type: 'search', placeholder: '按编号或别名筛选，例如 p03 / 演示被试',
           value: local.filter || '',
         });
         filterInput.addEventListener('input', () => { local.filter = filterInput.value; paint(); });
@@ -205,7 +206,7 @@ export async function render(container, ctx) {
     if (!subjects.length) details.open = true;
     details.append(el('summary', { text: subjects.length ? '没有合适的？点这里新建一位被试' : '新建一位被试' }));
     // 只问必要的一件事（别名），编号/同意版本走默认值
-    const labelInput = el('input', { id: 'wizard-subject-label', type: 'text', placeholder: '例如：张三 / 演示被试' });
+    const labelInput = el('input', { id: 'wizard-subject-label', type: 'text', placeholder: '例如：匿名昵称 / 演示被试' });
     const idInput = el('input', { id: 'wizard-subject-id', type: 'text', placeholder: '留空自动生成', maxlength: 8 });
     const createBtn = button('新建并选中', async () => {
       const label = labelInput.value.trim();
@@ -254,6 +255,22 @@ export async function render(container, ctx) {
    */
   const paintDeviceStep = () => {
     const host2 = el('div', { class: 'stack' });
+    host2.append(button(scanning ? '扫描中…' : '重新扫描设备', async () => {
+      if (scanning) return;
+      scanning = true; paint();
+      try {
+        const response = await api.devices(1.2);
+        if (ctx.signal.aborted) return;
+        sources = list(pick(response.data, 'sources', []));
+        real = sources.filter((item) => pick(item, 'real') && !String(pick(item, 'key', '')).startsWith('unsupported:'));
+        if (local.device !== 'sim-bsense' && !real.some((item) => pick(item, 'key') === local.device)) { local.device = ''; local.previewController?.selectionChanged(); }
+      } catch (error) {
+        if (!ctx.signal.aborted) toast(describeError(error));
+      } finally {
+        scanning = false;
+        if (!ctx.signal.aborted) paint();
+      }
+    }, { small: true, disabled: scanning }));
     if (real.length) {
       host2.append(el('p', { class: 'wizard__ok', text: `✓ 检测到 ${fmtInt(real.length)} 个实时数据源` }));
       const eegStreams = real.filter((item) => pick(item, 'is_eeg', false) === true);
@@ -265,7 +282,7 @@ export async function render(container, ctx) {
         return el('button', {
           class: 'pick' + (local.device === key ? ' pick--on' : ''),
           type: 'button',
-          onClick: () => { local.device = key; paint(); },
+          onClick: () => { local.device = key; local.scale = 1.0; local.previewController?.selectionChanged(); paint(); },
         }, [
           el('span', { class: 'pick__title', text: String(pick(item, 'device', key)) }),
           el('span', { class: 'pick__note', text: `${kindLabel}｜${pick(item, 'channels', '?')} 通道 · ${pick(item, 'srate', '?')} Hz`
@@ -310,7 +327,7 @@ export async function render(container, ctx) {
     host2.append(el('hr', { class: 'wizard__sep' }));
     host2.append(el('div', { class: 'row' }, [
       choiceCard('用仿真源演示（非真实设备）', '不接硬件也能把流程走完；报告里会标注"仿真"',
-        local.device === 'sim-bsense', () => { local.device = 'sim-bsense'; paint(); }),
+        local.device === 'sim-bsense', () => { local.device = 'sim-bsense'; local.previewController?.selectionChanged(); paint(); }),
     ]));
     if (local.device && local.device !== 'sim-bsense' && deviceIsUsable() === false) {
       const row = real.find((item) => String(pick(item, 'key', '')) === local.device) || {};
@@ -322,7 +339,7 @@ export async function render(container, ctx) {
     // 预览卡只建一次：renderPreviewCard 会注册轮询定时器，每次 paint() 都重建会越积越多
     // （每次重建都新起一个 interval，只有第一个在卸载时被清掉）。节点复用即可。
     if (!local.previewBuilt) {
-      renderPreviewCard(ctx, local.previewHost);
+      local.previewController = renderPreviewCard(ctx, local.previewHost, { getSource: () => local.device });
       local.previewBuilt = true;
     }
     host2.append(local.previewHost);
@@ -335,8 +352,10 @@ export async function render(container, ctx) {
     host2.append(el('p', { class: 'muted', text: '选节奏（决定整场检测多久、要不要被测者本人操作）' }));
     const scaleHost = el('div', { class: 'choice-row' });
     for (const item of SCALE_CHOICES) {
-      scaleHost.append(choiceCard(item.title, item.note, local.scale === item.value,
-        () => { local.scale = item.value; paint(); }));
+      const choice = choiceCard(item.title, item.note, local.scale === item.value,
+        () => { local.scale = item.value; paint(); });
+      choice.disabled = item.value !== 1.0 && local.device !== 'sim-bsense';
+      scaleHost.append(choice);
     }
     host2.append(scaleHost);
     // 协议档：完整 / 短协议。阶段数、时长、行为任务试次数全部来自 /api/config 的 profiles，
@@ -366,6 +385,7 @@ export async function render(container, ctx) {
         host2.append(el('p', { class: 'wizard__warn', text: pick(picked, 'caveat') }));
       }
     }
+    if (local.protocol !== 'short') {
     host2.append(el('p', { class: 'muted', text: '选训练时长' }));
     const modeHost = el('div', { class: 'choice-row' });
     for (const item of MODE_CHOICES) {
@@ -373,9 +393,6 @@ export async function render(container, ctx) {
         () => { local.mode = item.value; paint(); }));
     }
     host2.append(modeHost);
-    if (local.protocol === 'short') {
-      // 短协议不跑训练：训练时长这个选项就没意义了，如实说明而不是让人选了没效果
-      host2.append(el('p', { class: 'muted', text: '（短协议不跑神经反馈训练，上面的训练时长不生效）' }));
     }
     const labelInput = el('input', {
       id: 'wizard-session-label', type: 'text', placeholder: '例如：第一次检测', value: local.label,
@@ -391,8 +408,9 @@ export async function render(container, ctx) {
     const phases = activeKeys.length
       ? allPhases.filter((item) => activeKeys.includes(pick(item, 'key', '')))
       : allPhases;
-    const totalSec = Number(pick(picked, 'total_sec', 0))
+    const baseTotalSec = Number(pick(picked, 'total_sec', 0))
       || phases.reduce((sum, item) => sum + (Number(pick(item, 'duration_sec', 0)) || 0), 0);
+    const totalSec = baseTotalSec + (local.protocol === 'full' ? 30 + (local.mode === 'full' ? 240 : 0) : 0);
     const interactive = phases.filter((item) => pick(item, 'interactive', false));
     const pvt = pick(protocol, 'pvt', {}) || {};
     const scales = pick(protocol, 'scales', {}) || {};
@@ -411,8 +429,8 @@ export async function render(container, ctx) {
       return row ? pick(row, 'label', key) : key;
     });
     const burden = [];
-    if (totalSec) burden.push(`整场约 ${(totalSec / 60).toFixed(0)} 分钟`);
-    if (interactive.length) {
+    if (totalSec) burden.push(local.scale === 1.0 ? `整场约 ${(totalSec / 60).toFixed(0)} 分钟（量表作答速度会影响总时长）` : '快速演示使用自动生成的量表及行为作答，时长随计算和采集速度变化');
+    if (interactive.length && local.scale === 1.0) {
       burden.push(`需要被测者动手的有 ${fmtInt(interactive.length)} 步：量表 ${fmtInt(scaleItems)} 题、`
         + `SART ${fmtInt(sartTotal)} 个试次（No-Go ${fmtInt(pick(picked, 'sart_nogo_trials', 0) || 0)} 个）、`
         + `PVT ${pvtTrials ? `约 ${fmtInt(pvtTrials)} 次按键` : '按键'}`);
@@ -423,24 +441,36 @@ export async function render(container, ctx) {
     if (droppedLabels.length) {
       burden.push(`本次不跑：${droppedLabels.join('、')}`);
     }
-    host2.append(card('这次检测会发生什么', el('div', { class: 'stack' }, [
+    host2.prepend(el('div', { class: 'setup-summary' }, [
+      el('span', { class: 'eyebrow', text: '开始前确认' }),
+      el('h2', { text: local.protocol === 'short' ? '本次做专注力评估' : '本次做评估与专注力训练' }),
+      el('div', { class: 'setup-summary__facts' }, [
+        el('span', { text: `被试 sub-${local.subject || '—'}` }),
+        el('span', { text: local.device === 'sim-bsense' ? '仿真数据 · 仅演示' : '真实脑电设备' }),
+        el('span', { text: local.scale === 1.0 ? `预计约 ${Math.round(totalSec / 60)} 分钟` : '快速演示 · 自动作答' }),
+      ]),
+    ]));
+    const planDetails = el('details', { class: 'result-details' }, [el('summary', { text: '查看任务安排与操作说明' })]);
+    planDetails.append(card('这次检测会发生什么', el('div', { class: 'stack' }, [
       burden.length ? el('p', { class: 'wizard__burden', text: burden.join('；') + '。' }) : null,
       el('ul', { class: 'wizard__plan' }, [
         el('li', { text: '① 设备质检 → ② 睁眼/闭眼静息基线 → ③ 量表（SAS/SDS 各 20 题）' }),
         el('li', { text: '④ SART 持续注意（看到数字按空格，看到 3 不要按）→ ⑤ PVT 警觉度（出现红点尽快按）' }),
-        el('li', { text: '⑥ 任务态监测 → ⑦ 神经反馈训练 → ⑧ 联合评估、模型与报告' }),
+        el('li', { text: local.protocol === 'short' ? '⑥ 任务态监测 → ⑦ 联合评估与报告' : '⑥ 任务态监测 → ⑦ 神经反馈训练及训练后静息基线 → ⑧ 联合评估、模型与报告' }),
         el('li', { text: local.scale === 1.0
           ? '需要被测者配合的只有 ③④⑤；其余阶段保持安静坐好即可'
           : '快速演示：③④⑤ 由服务端自动作答，不需要人操作' }),
       ]),
     ]), { sub: `被试 sub-${pick(subject, 'public_id', local.subject || '—')}`
       + `｜设备 ${local.device || '—'}｜${local.scale === 1.0 ? '真实节奏' : '快速演示'}` }));
+    host2.append(planDetails);
     host2.append(el('p', { class: 'muted', text: '点「开始检测」后页面会自动切到被测者视图'
       + '（隐藏导航与顶栏，只留当前要做的动作）；操作者按 Esc 可随时退出该视图。' }));
     return host2;
   };
 
   const paint = () => {
+    host.dataset.step = String(local.step);
     paintSteps();
     bodyHost.textContent = '';
     const step = STEPS[local.step];
@@ -451,6 +481,9 @@ export async function render(container, ctx) {
   };
 
   async function startSession() {
+    if (submitting || !canNext()) return;
+    submitting = true;
+    paintFoot();
     const payload = {
       participant: local.subject,
       device: local.device || null,
@@ -464,6 +497,7 @@ export async function render(container, ctx) {
     if (startBtn) { startBtn.disabled = true; startBtn.textContent = '启动中…'; }
     try {
       const response = await api.createSession(payload);
+      if (ctx.signal.aborted) return;
       const uuid = pick(response.data, 'session.uuid');
       ctx.store.setState({
         currentSession: pick(response.data, 'session', null),
@@ -473,16 +507,31 @@ export async function render(container, ctx) {
       toast('检测已开始，已切到被测者视图（按 Esc 退出）', 'info');
       ctx.navigate(`#/flow?session=${uuid}&subject=1`);
     } catch (error) {
-      toast(describeError(error));
-      paint();
+      if (!ctx.signal.aborted) toast(describeError(error));
+    } finally {
+      submitting = false;
+      if (!ctx.signal.aborted) paintFoot();
     }
   }
 
   host.append(
-    el('div', { class: 'row row--between' }, [
-      el('h1', { text: '开始一次检测' }),
-      button('看历史记录', () => ctx.navigate('#/history'), { small: true }),
+    el('section', { class: 'focus-hero', 'aria-label': '专注力训练准备' }, [
+      el('div', {}, [
+        el('span', { class: 'eyebrow', text: '凝思 / EEG FEEDBACK' }),
+        el('h1', { text: '专注力训练准备' }),
+        el('p', { class: 'focus-hero__intro', text: '使用便携脑电设备完成个体基线评估与反馈训练。开始前，请确认被试、设备信号和检测协议。' }),
+      ]),
+      el('div', { class: 'focus-hero__side' }, [
+        el('span', { class: 'eyebrow', text: '训练链路' }),
+        el('ol', { class: 'protocol-outline' }, [
+          el('li', {}, [el('span', { text: '01' }), '脑电采集与信号质检']),
+          el('li', {}, [el('span', { text: '02' }), '个体基线与状态评估']),
+          el('li', {}, [el('span', { text: '03' }), '专注力反馈训练']),
+        ]),
+        button('查看历史记录', () => ctx.navigate('#/history'), { small: true }),
+      ]),
     ]),
+    ...(errors.length ? [el('div', { class: 'load-warning', role: 'alert' }, [el('p', { text: errors.join('；') }), button('重新加载', () => window.location.reload(), { small: true })])] : []),
     stepsHost,
     bodyHost,
     footHost,

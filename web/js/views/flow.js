@@ -82,17 +82,7 @@ const ADVANCE_TEXT = {
   operator: '本阶段需要操作者确认',
 };
 
-/**
- * 试次事件的到达时刻**就是刺激呈现时刻**，不要再扣任何"起步延时"。
- *
- * 2026-10-07 修正（用户反馈「SART 和 PVT-B 显示的时间总是 0.05s」）：
- * 这里原来扣 `TRIAL_START_DELAY = {sart_main: 2.2, sart_practice: 1.6}`（正好等于整个 SOA）。
- * 但服务端是 **publish("trial") 即为刺激时刻**（`_run_sart` 里 publish 之后才 `wait_for_input`，
- * 固定 SOA 的 sleep 发生在两次 publish 之间），前端也是收到事件就立刻画数字；
- * 于是 `elapsed - 2.2` 对任何真人都是负数，反应时永远被钳到下限 0.05 s。
- * PVT 仍保留一项目标：用相邻 onset 差值校准本地时钟（`delay`），SART 恒为 0。
- */
-const TRIAL_CLOCK_CORRECTION_ONLY = true;
+// 刺激呈现和按键使用同一 performance.now 时钟；相邻试次间隔不是时钟偏差。
 
 export function render(container, ctx) {
   container.textContent = '';
@@ -140,6 +130,7 @@ export function render(container, ctx) {
   const noticeHost = el('div');
   const phaseHost = el('div');
   const interactionHost = el('div', { class: 'flow-task' });
+  let completedDetails = null;
   const scaleSummaryHost = el('div');
   const tailHost = el('div');
   const taskBarHost = el('div', { class: 'flow-taskbar' });
@@ -370,7 +361,7 @@ export function render(container, ctx) {
    * 任务结束自动回总览；同一任务内可用任务条上的按钮手动切回，**不中断会话**。
    */
   const taskModeLabel = () => {
-    if (local.finished) return null;
+    if (local.finished || !['scales', 'sart', 'pvt'].includes(currentPhaseKey())) return null;
     const stage = interactionHost.querySelector('.task-stage');
     const scale = interactionHost.querySelector('.scale-item');
     const anchor = stage || scale;
@@ -393,6 +384,13 @@ export function render(container, ctx) {
     [...interactionHost.children].forEach((child) => {
       const isTask = !!child.querySelector('.scale-item, .task-stage');
       child.classList.toggle('flow-task-hidden', !isTask);
+      const slot = child.dataset.slot;
+      const phases = { quality: ['qc'], baseline: ['baseline_open', 'baseline_closed'],
+        monitor: ['monitor'], waveform: ['monitor'], training: ['training'],
+        'training-feedback': ['training'], segments: ['training'], assessment: ['assessment'],
+        model: ['model'], artifacts: ['report'], 'result-sart': ['sart'], 'result-pvt': ['pvt'] };
+      child.classList.toggle('flow-phase-hidden', !local.finished && !!phases[slot]
+        && !phases[slot].includes(currentPhaseKey()));
     });
   };
 
@@ -422,7 +420,7 @@ export function render(container, ctx) {
     // 只按 label/模式做键会让细条早退、一直显示旧步数（实测踩到「第 1 / 11 步」）。
     const phaseKeyNow = currentPhaseKey();
     const indexNow = local.phaseOrder.findIndex((item) => item.key === phaseKeyNow);
-    const key = `${label}|${local.forceOverview ? 'overview' : 'stage'}|${local.subjectMode ? 'subject' : 'op'}`
+    const key = `${local.finished}|${label}|${local.forceOverview ? 'overview' : 'stage'}|${local.subjectMode ? 'subject' : 'op'}`
       + `|${indexNow + 1}/${local.phaseOrder.length}`;
     if (key === local.taskBarKey) return;                 // 幂等：观察者回调里重复调用不再改 DOM
     local.taskBarKey = key;
@@ -431,15 +429,15 @@ export function render(container, ctx) {
     const phaseKey = phaseKeyNow;
     const index = indexNow;
     const phaseRow = local.phaseOrder[index] || {};
-    const title = label || pick(phaseRow, 'label', null) || '会话流程';
-    const stepText = local.forceOverview
+    const title = local.finished ? '会话结束' : (label || pick(phaseRow, 'label', null) || '会话流程');
+    const stepText = local.finished ? `共 ${local.phaseOrder.length} 步` : local.forceOverview
       ? `第 ${index + 1} / ${local.phaseOrder.length} 步 · 正在看全部阶段`
       : `第 ${index + 1} / ${local.phaseOrder.length} 步`;
     const subjectButton = local.subjectMode
       ? button('退出被测者视图（Esc）', () => setSubjectMode(false), { small: true })
       : button('被测者视图（全屏）', () => setSubjectMode(true), { small: true });
     taskBarHost.append(
-      el('span', { class: 'badge badge--strong', text: local.subjectMode ? '被测者请按提示操作'
+      el('span', { class: 'badge badge--strong', text: local.finished ? '查看检测结果' : local.subjectMode ? '被测者请按提示操作'
         : (label ? '任务进行中' : '本阶段') }),
       el('strong', { text: title }),
       el('span', { class: 'muted', text: stepText }),
@@ -476,6 +474,7 @@ export function render(container, ctx) {
     // 换阶段 → 本阶段页淡入一次
     if (phaseNow && phaseNow !== local.lastFlashPhase) {
       local.lastFlashPhase = phaseNow;
+      stageHost.scrollTop = 0;
       flashStageEnter();
     }
     markTaskCards();
@@ -507,12 +506,20 @@ export function render(container, ctx) {
 
   /** 把"已用 / 预计"折算成一句人话。 */
   const describeTiming = (phase, state) => {
-    const expected = Number(pick(phase, 'duration_sec', 0)) || 0;
+    let expected = Number(pick(phase, 'duration_sec', 0)) || 0;
     if (!expected) return null;
     const startedAt = local.phaseStartedAt.get(phase.key);
-    const elapsed = startedAt ? (local.now - startedAt) / 1000 : null;
+    const elapsed = startedAt ? Math.max(0, (local.now - startedAt) / 1000) : null;
     const scale = Number(pick(ctx.store.state.currentSession, 'time_scale', 1)) || 1;
-    const shown = expected * scale;
+    let shown = expected * scale;
+    if (phase.key === 'training') {
+      const mode = pick(ctx.store.state.currentSession, 'training_mode', 'quick');
+      const plan = pick(ctx.store.state.config, `training.${mode}`, {}) || {};
+      const segments = Number(plan.segments) || (mode === 'full' ? 4 : 2);
+      const segmentSec = Number(plan.segment_sec) || 120;
+      expected = segments * segmentSec + 30;
+      shown = segments * Math.max(4, segmentSec * scale) + 30 * scale;
+    }
     if (state === 'running' && elapsed !== null) {
       const left = Math.max(0, shown - elapsed);
       return `预计 ${fmtSeconds(shown, 0)}｜已用 ${fmtSeconds(elapsed, 0)}｜约剩 ${fmtSeconds(left, 0)}`;
@@ -543,6 +550,13 @@ export function render(container, ctx) {
   };
 
   const renderDoneCard = () => {
+    if (!completedDetails) {
+      completedDetails = el('details', { class: 'result-details completed-details' }, [
+        el('summary', { text: '查看检测过程与各阶段记录' }),
+      ]);
+      completedDetails.append(noticeHost, interactionHost);
+      stageHost.append(completedDetails);
+    }
     const session = ctx.store.state.currentSession || {};
     const status = pick(session, 'status', 'done');
     const failed = status === 'failed' || status === 'cancelled';
@@ -590,7 +604,7 @@ export function render(container, ctx) {
         : button('查看评估报告', () => ctx.navigate(`#/report?session=${uuid}`), { primary: true }),
       failed ? button('查看报告', () => ctx.navigate(`#/report?session=${uuid}`), { small: true }) : null,
       el('a', { href: api.exportZipUrl(uuid), text: '下载全部产物（zip）' }),
-      button('训练视图', () => ctx.navigate(`#/training?session=${uuid}`), { small: true }),
+      (local.protocolLabel || pick(session, 'protocol_label', '')) === '短协议' ? null : button('查看训练结果', () => ctx.navigate(`#/training?session=${uuid}`), { small: true }),
       button('历史会话', () => ctx.navigate('#/history'), { small: true }),
       button('再测一次', () => ctx.navigate('#/start'), { small: true }),
     ]));
@@ -608,6 +622,8 @@ export function render(container, ctx) {
     // 会话结束后不再显示"当前阶段"：11 个阶段全 done 时 currentPhaseKey() 会退化成第 1 个阶段，
     // 页面就会同时写着"阶段 1/11"和"总进度 100%"，自相矛盾（用户看到的就是这种"乱"）。
     if (local.finished) {
+      headActions.querySelector('button:last-child').hidden = true;
+      renderTaskBar(null);
       renderDoneCard();
       return;
     }
@@ -1133,7 +1149,7 @@ export function render(container, ctx) {
     let slot = local.taskSlots && local.taskSlots.get(task);
     if (slot) return slot;
     if (!local.taskSlots) local.taskSlots = new Map();
-    const host = el('div');
+    const host = el('div', { dataset: { slot: task } });
     slot = { task, host };
     local.taskSlots.set(task, slot);
     interactionHost.append(host);
@@ -1323,14 +1339,10 @@ export function render(container, ctx) {
     return firstHost;
   };
 
-  /**
-   * 反应时（秒）= 按键时刻 − 刺激呈现时刻，只扣 PVT 的时钟校准项。
-   * 下限 0.05 只作"异常值兜底"（服务端也钳 0.05–10.0），正常情况下不该再恒等于 0.05。
-   */
+  // 反应时直接取本次刺激到按键的本地时间差，不扣等待期，不填造下限。
   const reactionTime = (trial) => {
     const elapsed = (performance.now() - trial.onset) / 1000;
-    const correction = Math.max(0, trial.delay || 0);
-    return Math.max(0.05, elapsed - correction);
+    return Math.max(0, elapsed);
   };
 
   /** 作答当前试次（空格键 / 点击刺激区 / 点「点击作答」按钮都走这里）。 */
@@ -1572,6 +1584,16 @@ export function render(container, ctx) {
       }
       case 'notice': {
         local.notices.push({ level: payload.level, message: payload.message });
+        if (String(payload.message || '').includes('训练结束')) {
+          const slot = local.taskSlots?.get('training-feedback');
+          if (slot?.value) {
+            slot.value.textContent = '训练已结束';
+            slot.target.textContent = '正在采集训练后基线';
+            slot.hold.hidden = true;
+            slot.status.textContent = payload.message;
+            slot.hint.textContent = '保持安静坐姿，自然呼吸，等待页面自动进入下一阶段。';
+          }
+        }
         renderNotices();
         break;
       }
@@ -1621,7 +1643,9 @@ export function render(container, ctx) {
             ...Object.entries(indices).map(([key, stat]) => [`指标 ${key}`, stat]),
           ]),
           pick(baseline, 'valid') === false
-            ? el('p', { class: 'muted', text: '该基线无效，后续指标不可用（界面统一显示 "—"）。' })
+            ? el('p', { class: 'muted', text: payload.key === 'baseline_closed'
+              ? '闭眼基线有效窗不足；任务评分仍以睁眼基线是否合格为准。'
+              : '睁眼基线有效窗不足，暂停个体评分。请检查电极接触，保持放松并重新采集；波形和频带功率仍可查看。' })
             : null,
         ])));
         break;
@@ -1669,16 +1693,6 @@ export function render(container, ctx) {
         const task = taskKey(payload.task
           || (local.behaviorRequest && local.behaviorRequest.task) || 'sart');
         const at = performance.now();
-        // PVT 的 onset 是绝对时刻：当同一序列里两个 onset 都到达后，可用差值校准本地时钟；
-        // SART 没有这项（刺激就是事件到达时刻）。**不再扣 SOA**——见 reactionTime 上方注释。
-        let clockSkew = 0;
-        if (task === 'pvt' && typeof payload.onset === 'number') {
-          if (typeof local.previousOnset === 'number' && local.previousArrival) {
-            clockSkew = (at - local.previousArrival) / 1000 - (payload.onset - local.previousOnset);
-          }
-          local.previousOnset = payload.onset;
-          local.previousArrival = at;
-        }
         local.trial = {
           task,
           phase: payload.phase || 'main',
@@ -1686,7 +1700,6 @@ export function render(container, ctx) {
           digit: payload.digit ?? null,
           total: payload.total ?? null,
           onset: at,
-          delay: Math.max(0, clockSkew),    // 只有 PVT 的时钟校准项；SART 恒为 0
           stimulus: true,                   // 本试次的刺激已经呈现（PVT 据此画红点/计时器）
           keyReady: true,
           responseWindow: Number(payload.response_window) || null,
@@ -1777,12 +1790,37 @@ export function render(container, ctx) {
         ])));
         break;
       }
+      case 'feedback': {
+        const slot = ensureTaskSlot('training-feedback');
+        if (!slot.value) {
+          slot.value = el('strong', { class: 'feedback-score mono' });
+          slot.target = el('span', { class: 'muted' });
+          slot.hold = el('progress', { max: 1, value: 0, 'aria-label': '连续保持训练目标的进度' });
+          slot.status = el('p');
+          slot.hint = el('p', { class: 'muted', text: '自然呼吸，保持坐姿，尝试把专注度稳定在目标线以上。' });
+          slot.host.append(card('当前训练反馈', el('div', { class: 'flow-feedback' }, [
+            el('div', { class: 'row row--between' }, [slot.value, slot.target]),
+            slot.hold, slot.status, slot.hint,
+          ])));
+          interactionHost.prepend(slot.host);
+        }
+        const usable = payload.usable === true && Number.isFinite(payload.score);
+        const hold = Math.max(0, Number(payload.current_hold_sec) || 0);
+        const required = Math.max(0, Number(payload.hold_sec) || 0);
+        slot.value.textContent = usable ? fmtNum(payload.score, 3) : '信号待恢复';
+        slot.target.textContent = `第 ${fmtInt(payload.segment)} 段 · 目标 ${fmtNum(payload.target, 3)}`;
+        slot.hold.value = usable && required > 0 ? Math.min(1, hold / required) : 0;
+        slot.status.textContent = !usable ? '当前信号质量不足，此窗不计入有效训练。'
+          : payload.achieved ? '本段已达到连续保持要求，继续稳定保持。'
+          : `连续保持 ${fmtDuration(hold)} / ${fmtDuration(required)} · ${payload.on_target ? '已到目标线，继续保持' : '尚未到目标线，平稳调整'}`;
+        break;
+      }
       case 'segment': {
         const slot = ensureTaskSlot('segments');
         const body = slot.body || (slot.body = el('div'));
         const stats = payload.stats || {};
         body.append(table([
-          { title: '段', render: () => fmtInt(pick(payload, 'seq')) },
+          { title: '段', render: () => fmtInt(Number(pick(payload, 'seq', 0)) + 1) },
           { title: '目标（前→后）', render: () => `${fmtNum(payload.target, 3)} → ${fmtNum(payload.target_after, 3)}` },
           { title: '均值', align: 'right', render: () => fmtNum(pick(stats, 'mean'), 3) },
           { title: '达标占比', align: 'right', render: () => fmtPercent(pick(stats, 'on_target_ratio')) },
@@ -1816,7 +1854,7 @@ export function render(container, ctx) {
           ['验证 AUC', fmtNum(pick(payload, 'validation.auc'), 4)],
           ['测试 AUC', fmtNum(pick(payload, 'test.auc'), 4)],
           ['模型文件', pick(payload, 'model_path', DASH)],
-        ]), { sub: `划分 训练/验证/测试 = ${fmtInt(pick(payload, 'subject_split.train'))}/${fmtInt(pick(payload, 'subject_split.validation'))}/${fmtInt(pick(payload, 'subject_split.test'))}` }));
+        ]), { sub: `数据来自内置仿真被试；不代表真实人群表现。训练/验证/测试被试数 = ${list(pick(payload, 'subject_split.train', [])).length}/${list(pick(payload, 'subject_split.validation', [])).length}/${list(pick(payload, 'subject_split.test', [])).length}` }));
         break;
       }
       case 'artifacts': {

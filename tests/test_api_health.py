@@ -271,6 +271,10 @@ class NoSignalPolicyTests(StudioTestCase):
     def test_default_device_never_falls_back_to_sim(self) -> None:
         response = self._create({"time_scale": 0.05, "create_subject": True})
         if self._detected():
+            if response.status == 422:
+                error = self.assert_error(response, 422, "validation_failed")
+                self.assertIn("真实节奏", error["message"])
+                return
             # 有实时源：应当用实时源（成功），或因为"流在但没样本"而如实失败；
             # 无论哪种，都**不允许**变成仿真会话。
             if response.status == 201:
@@ -291,6 +295,10 @@ class NoSignalPolicyTests(StudioTestCase):
 
     def test_auto_device_alias_matches_default(self) -> None:
         response = self._create({"device": "auto", "time_scale": 0.05, "create_subject": True})
+        if self._detected() and response.status == 422:
+            error = self.assert_error(response, 422, "validation_failed")
+            self.assertIn("真实节奏", error["message"])
+            return
         if self._detected() and response.status == 201:
             payload = response.json()
             self.assertTrue(str(payload["session"]["source"]).startswith("lsl:"),
@@ -359,10 +367,19 @@ class NoSignalPolicyTests(StudioTestCase):
                 mock.patch.object(runtime_module, "build_source",
                                   side_effect=RuntimeError("fake stream unavailable")):
             response = self._create({"device": "lsl:Fake IR-0002", "allow_non_eeg": True,
-                                     "time_scale": 0.05, "create_subject": True})
+                                     "time_scale": 1.0, "create_subject": True})
         self.assertEqual(response.status, 409, "流打不开仍应如实 409")
         self.assertNotIn("不是脑电流", json.dumps(response.json(), ensure_ascii=False),
                          "allow_non_eeg=true 时不应再被类型守卫拦下")
+
+    def test_live_stream_rejects_accelerated_automatic_answers(self) -> None:
+        from ningsi_studio.core import live_source as ls
+        fake = [{"key": "lsl:Fake EEG", "kind": "lsl", "stream_kind": "eeg", "real": True}]
+        with mock.patch.object(ls, "list_available", return_value=fake):
+            error = self.assert_error(self._create({"device": "lsl:Fake EEG", "time_scale": 0.05}),
+                                      422, "validation_failed", "真实流必须使用真实节奏")
+        self.assertIn("真实节奏", error["message"])
+
 
 
 class PreviewTests(StudioTestCase):

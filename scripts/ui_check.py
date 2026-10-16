@@ -11,11 +11,11 @@ import base64
 import json
 import os
 import secrets
-import shutil
 import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -170,8 +170,7 @@ def main() -> int:
         print("找不到 Edge，跳过浏览器端到端测试")
         return 0
 
-    tmp = Path(os.environ.get("TEMP", ".")) / "ningsi-ui-e2e"
-    shutil.rmtree(tmp, ignore_errors=True)
+    tmp = Path(tempfile.mkdtemp(prefix="ningsi-ui-e2e-"))
     settings = Settings(data_dir=tmp / "data", port=AppServer.free_port(19500))
     settings.ensure_dirs()
     app = create_app(settings)
@@ -435,7 +434,7 @@ def main() -> int:
         for item in failures:
             print("  [失败] " + item)
         return 1
-    print("  [通过] 按钮可点、会话启动、实时监测页收到并绘制了真实脑电数据")
+    print("  [通过] 按钮可点、会话启动、实时监测页收到并绘制了 LSL 仿真脑电数据（非真人采集）")
     return 0
 
 

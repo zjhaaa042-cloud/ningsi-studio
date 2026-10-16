@@ -238,6 +238,10 @@ def build_router(settings: Settings) -> Router:
             "specs": bootstrap.engine_versions(),
             "window_sec": engine_config.WINDOW_SEC,
             "step_sec": engine_config.STEP_SEC,
+            "focus_score": {"range": [engine_config.SCORE_MIN, engine_config.SCORE_MAX],
+                            "algorithm_id": engine_config.INDICATOR_SPEC,
+                            "algorithm_version": engine_config.VERSION,
+                            "definition": "beta/theta; individual baseline z-score; logistic mapping"},
             "welch": engine_config.WELCH,
             "bands": {key: list(value) for key, value in engine_config.BANDS.items()},
             "total_band": list(engine_config.TOTAL_BAND),
@@ -455,6 +459,27 @@ def build_router(settings: Settings) -> Router:
         # 先做并发上限预检：避免 429 之后在库里留下"没有运行线程的幽灵会话"
         manager.ensure_capacity()
         public_id = schemas.normalize_public_id(payload["participant"])
+        time_scale = schemas.clamp_float(payload.get("time_scale", payload.get("speed")), 1.0,
+                                         low=0.01, high=1.0, name="时间倍率")
+        srate = schemas.clamp_float(payload.get("srate"), 250.0, low=1.0, high=2000.0, name="采样率")
+        channels = schemas.clamp_int(payload.get("channels"), 1, low=1, high=8, name="通道数")
+        training_mode = payload.get("training_mode") or "quick"
+        if training_mode not in ("quick", "full"):
+            raise ValidationError("训练模式必须是 quick 或 full",
+                                  detail=training_mode)
+        # 协议档：full（11 步，默认）/ short（9 步：去掉训练与模型，SART/PVT 减半）。
+        # 未知值一律回落完整协议——**绝不把拼错的档名当成短协议**。
+        protocol_raw = schemas.optional_text(payload.get("protocol"), max_len=16, name="协议档")
+        protocol = phase_module.normalize_profile(protocol_raw)
+        if protocol_raw and protocol_raw.strip().lower() not in phase_module.PROFILES:
+            raise ValidationError(
+                f"协议档只能是 {sorted(phase_module.PROFILES)} 之一（收到 {protocol_raw!r}）",
+                detail=protocol_raw)
+
+        if not schemas.as_bool(payload.get("create_subject"), True):
+            with store.read_only(db_path) as conn:
+                if repo.find_subject(conn, public_id) is None:
+                    raise NotFound(f"被试不存在：sub-{public_id}")
         # 数据源解析（2026-10-07 起收紧）：**不再有"缺省仿真"**。
         #   · 不传 device / 传 auto ⇒ 用当前检测到的实时源；一个都没有就 409，让用户去接设备；
         #   · 传 lsl:<流名> ⇒ 先确认这条流现在真的可见，避免"建好会话才发现没信号"；
@@ -498,22 +523,8 @@ def build_router(settings: Settings) -> Router:
                 f"设备 / 数据源只能是 lsl:<流名称>（实时设备）或 {live_source.SIM_SOURCE}"
                 f"（显式选择仿真，仅演示/自测用），收到 {device!r}",
                 detail=device)
-        time_scale = schemas.clamp_float(payload.get("time_scale", payload.get("speed")), 1.0,
-                                         low=0.01, high=1.0, name="时间倍率")
-        srate = schemas.clamp_float(payload.get("srate"), 250.0, low=1.0, high=2000.0, name="采样率")
-        channels = schemas.clamp_int(payload.get("channels"), 1, low=1, high=8, name="通道数")
-        training_mode = payload.get("training_mode") or "quick"
-        if training_mode not in engine_config.TRAINING:
-            raise ValidationError(f"训练模式必须是 {sorted(engine_config.TRAINING)} 之一",
-                                  detail=training_mode)
-        # 协议档：full（11 步，默认）/ short（9 步：去掉训练与模型，SART/PVT 减半）。
-        # 未知值一律回落完整协议——**绝不把拼错的档名当成短协议**。
-        protocol_raw = schemas.optional_text(payload.get("protocol"), max_len=16, name="协议档")
-        protocol = phase_module.normalize_profile(protocol_raw)
-        if protocol_raw and protocol_raw.strip().lower() not in phase_module.PROFILES:
-            raise ValidationError(
-                f"协议档只能是 {sorted(phase_module.PROFILES)} 之一（收到 {protocol_raw!r}）",
-                detail=protocol_raw)
+        if device.startswith("lsl:") and time_scale != 1.0:
+            raise ValidationError("真实脑电采集必须使用真实节奏（时间倍率1.0）；快速演示请显式选择仿真源 sim-bsense")
 
         with store.connect(db_path) as conn:
             subject = repo.find_subject(conn, public_id)
@@ -538,14 +549,13 @@ def build_router(settings: Settings) -> Router:
         # 再启动运行线程；否则运行线程装载会话时会撞上 "database is locked"。
         try:
             runtime = manager.start_with_rollback(row["uuid"], lambda reason: rollback_session(row["uuid"], reason))
+        except ApiError:
+            raise
         except Exception as exc:  # noqa: BLE001
             # 数据源打不开（例如"流可见但 8 秒内没有样本"）→ 409 + 明确原因，而不是 500。
             # 会话已在 rollback 回调里被标记为 failed，这里只负责把 HTTP 语义说清楚。
             raise Conflict(f"会话未能启动：{exc}") from exc
-        # 运行期会按"真实可用性"选数据源：`lsl:` 流没数据时运行时会退回仿真源，而建会话时
-        # 只按设备名推断 source。若不回写，同一响应里就会出现 source="lsl" 而
-        # runtime.source_kind="sim" 的自相矛盾，等于把"当前是仿真"这件事藏了起来
-        # （live_source.py 顶部与 docs/API.md 都要求如实标注、不做静默替换）。
+        # 按运行时选中的数据源回写；真实源启动失败会报错，不会静默转仿真。
         actual_source = getattr(getattr(runtime, "source", None), "key", None)
         if actual_source and actual_source != row["source"]:
             with store.connect(db_path) as conn:
@@ -626,6 +636,7 @@ def build_router(settings: Settings) -> Router:
             payload["source"] = actual_source
         payload["runtime"] = {
             "alive": bool(runtime and runtime.alive),
+            "source_note": runtime.source.note if runtime and runtime.source else None,
             "awaiting_input": runtime.awaiting() if runtime else [],
             "source": runtime.source.key if runtime and runtime.source else payload.get("source"),
             "source_kind": (runtime.source.kind if runtime and runtime.source

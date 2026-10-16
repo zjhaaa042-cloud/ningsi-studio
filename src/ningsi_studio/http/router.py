@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -131,8 +132,11 @@ class Request:
         if raw in (None, ""):
             return default
         try:
-            return float(raw)
-        except ValueError as exc:
+            value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError("expected a finite number")
+            return value
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValidationError(f"参数 {key} 必须是数字", detail=raw) from exc
 
 

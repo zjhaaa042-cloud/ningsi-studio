@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,7 +79,8 @@ class EventBus:
             if self.closed:
                 return {}
             self._counter += 1
-            event = {"id": self._counter, "type": event_type, "session": self.session_uuid}
+            event = {"id": self._counter, "type": event_type, "session": self.session_uuid,
+                     "emitted_at_ms": int(time.time() * 1000)}
             if payload is not None:
                 event["data"] = payload
             if extra:

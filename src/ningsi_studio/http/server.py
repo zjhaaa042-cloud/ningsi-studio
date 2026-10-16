@@ -135,6 +135,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._check_token(request)
                 response = self.router.dispatch(request)
                 if getattr(response, "stream", False):
+                    if self.command == "HEAD":
+                        on_close = getattr(response, "on_close", None)
+                        if on_close is not None:
+                            on_close()
+                        return self._send(Response(content_type=response.content_type))
                     return self.send_event_stream(
                         getattr(response, "preload", 0),
                         getattr(response, "queue", None),
@@ -142,10 +147,6 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                         getattr(response, "keep_alive", None),
                         getattr(response, "on_close", None),
                     )
-                if method == "HEAD" or self.command == "HEAD":
-                    return self._send(Response(status=response.status, body=b"",
-                                               content_type=response.content_type,
-                                               headers=dict(response.headers)))
                 self._send(response)
                 return
             self._serve_static(path)
@@ -310,8 +311,8 @@ class AppServer:
                 self.httpd = ThreadingHTTPServer((self.settings.host, port), handler_class)
                 self.httpd.daemon_threads = True
                 self.httpd.log_stream = self.log_stream
-                self.port = port
-                return port
+                self.port = self.httpd.server_address[1]
+                return self.port
             except OSError as exc:
                 last_error = exc
                 continue

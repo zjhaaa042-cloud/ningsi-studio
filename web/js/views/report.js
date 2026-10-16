@@ -254,9 +254,18 @@ export async function render(container, ctx) {
       host.append(card('评估报告', renderMarkdown(data)));
     } else {
       const markdown = composeMarkdown(data || {}, config);
-      host.append(card('评估报告', renderMarkdown(markdown), {
-        sub: `被试 sub-${pick(data, 'participant', DASH)}`,
-      }));
+      const summary = el('div', { class: 'report-summary' }, [
+        el('span', { class: 'eyebrow', text: '本次检测结果' }),
+        el('h2', { text: pick(data, 'assessment.conclusion', '暂无可用结论') }),
+        el('p', { class: 'muted', text: `被试 sub-${pick(data, 'participant', DASH)} · ${pick(data, 'extras.protocol_label', '检测协议未记录')}` }),
+        el('p', { class: 'summary-note', text: pick(data, 'extras.source_kind') === 'sim' ? '本次使用仿真数据，结果用于演示流程。' : '结合下面的证据与数据质量解释结果。' }),
+      ]);
+      host.append(card(null, summary));
+      const details = el('details', { class: 'result-details' }, [
+        el('summary', { text: '查看完整报告与评估证据' }),
+        renderMarkdown(markdown),
+      ]);
+      host.append(card('报告详情', details));
 
       // 建议与边界单独拆出来，便于快速阅读（原文仍在 Markdown 里）
       const advice = list(pick(data, 'assessment.advice', []));

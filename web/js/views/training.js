@@ -53,6 +53,7 @@ export function render(container, ctx) {
     button('报告', () => ctx.navigate(`#/report?session=${uuid}`)),
   ] : [];
   const host = pageFrame(container, '神经反馈训练', actions);
+  host.classList.add('training-page');
 
   if (!uuid) {
     host.append(card('尚未选择会话', el('div', {}, [
@@ -73,6 +74,8 @@ export function render(container, ctx) {
     target: null,
     score: null,
     onTarget: null,
+    currentHold: null,
+    maxHold: null,
     segment: null,
     mode: null,
     holdSec: pick(trainingConfig(), 'hold_sec', null),
@@ -103,10 +106,12 @@ export function render(container, ctx) {
       achieved: local.onTarget !== null
         ? local.onTarget
         : (typeof pick(stats, 'achieved') === 'boolean' ? pick(stats, 'achieved') : null),
-      seq: local.segment !== null ? local.segment : (seg ? pick(seg, 'seq', pick(seg, 'index')) : null),
-      holdSec: local.holdSec !== null && local.holdSec !== undefined
+      seq: local.segment !== null ? local.segment : (seg ? (typeof seg.seq === 'number' ? seg.seq + 1 : seg.index) : null),
+      currentHold: firstDefined(local.currentHold, pick(stats, "current_hold_sec")),
+      maxHold: firstDefined(local.maxHold, pick(stats, "max_hold_sec")),
+      holdSec: !local.summary && local.holdSec !== null && local.holdSec !== undefined
         ? local.holdSec
-        : firstDefined(pick(seg, 'hold_after'), pick(seg, 'hold_sec'), pick(trainingConfig(), 'hold_sec')),
+        : firstDefined(pick(seg, 'hold_sec'), pick(seg, 'hold_after'), pick(trainingConfig(), 'hold_sec')),
       mode: local.mode || pick(local.summary, 'mode'),
       ratio: firstDefined(pick(stats, 'on_target_ratio'), pick(local.summary, 'on_target_ratio')),
       n: pick(stats, 'n'),
@@ -119,7 +124,7 @@ export function render(container, ctx) {
   const segmentHost = el('div');
   const baselineHost = el('div');
   const noteHost = el('div');
-  host.append(el('div', { class: 'grid grid--2' }, [gaugeHost, statusHost]));
+  host.append(el('div', { class: 'training-overview' }, [gaugeHost, statusHost]));
   host.append(segmentHost);
   host.append(baselineHost);
   host.append(noteHost);
@@ -138,16 +143,16 @@ export function render(container, ctx) {
     const view = finalView();
     const body = el('div');
     gaugeHost.append(card('专注度仪表', body, {
-      sub: `目标线取自 feedback 事件的 target；达标判定阈值 ${fmtNum(pick(trainingConfig(), 'target_min'), 2)}–${fmtNum(pick(trainingConfig(), 'target_max'), 2)}`,
+      sub: `目标随训练表现调整；允许目标范围 ${fmtNum(pick(trainingConfig(), 'target_min'), 2)}–${fmtNum(pick(trainingConfig(), 'target_max'), 2)}`,
     }));
     drawGauge(body, view.score, {
       target: view.target,
-      color: SERIES_COLORS[0],
+      color: 'var(--accent)',
       note: view.target === null || view.target === undefined ? '' : `目标 ${fmtNum(view.target, 3)}`,
       label: '专注度仪表',
     });
     if (view.usingFallback && view.hasData) {
-      body.append(el('p', { class: 'muted', text: '会话已结束（feedback 不再推送）：仪表显示的是落库后的最终段 / 训练汇总口径。' }));
+      body.append(el('p', { class: 'muted', text: '仪表显示已保存的最后一段平均专注度和训练目标。' }));
     }
   };
 
@@ -160,23 +165,28 @@ export function render(container, ctx) {
     const ratioText = view.ratio === null || view.ratio === undefined
       ? DASH
       : `${fmtPercent(view.ratio)}（有效点 n=${fmtInt(view.n)}）`;
-    statusHost.append(card('达标状态', el('div', { class: 'grid grid--3' }, [
-      el('div', {}, [el('p', { class: 'muted', text: '当前专注度' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
+    statusHost.append(card('达标状态', el('div', { class: 'training-stats' }, [
+      el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注度' : '当前专注度' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '目标线' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.target, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '达标状态' }), el('p', { class: 'kpi__value', text: achieved })]),
       el('div', {}, [el('p', { class: 'muted', text: '当前段' }), el('p', { class: 'mono', text: fmtInt(view.seq) })]),
-      el('div', {}, [el('p', { class: 'muted', text: '训练模式' }), el('p', { text: view.mode || DASH })]),
+      el('div', {}, [el('p', { class: 'muted', text: '训练模式' }), el('p', { text: ({ quick: '简短训练', full: '标准训练' })[view.mode] || DASH })]),
       el('div', {}, [el('p', { class: 'muted', text: '保持时长要求' }), el('p', { class: 'mono', text: fmtDuration(view.holdSec) })]),
+      el('div', {}, [el('p', { class: 'muted', text: '当前连续保持 / 本段最长' }), el('p', { class: 'mono', text: `${fmtDuration(view.currentHold)} / ${fmtDuration(view.maxHold)}` })]),
       el('div', {}, [el('p', { class: 'muted', text: '本段达标时间占比' }), el('p', { class: 'mono', text: ratioText })]),
+      el('div', { class: 'training-hold' }, [
+        el('span', { class: 'muted', text: view.usingFallback ? '末段最长保持 / 目标要求' : '连续保持进度' }),
+        el('progress', { max: 1, value: typeof view.holdSec === 'number' && view.holdSec > 0 ? Math.min(1, Math.max(0, Number(view.usingFallback ? view.maxHold : view.currentHold) || 0) / view.holdSec) : 0, 'aria-label': '连续保持进度' }),
+      ]),
     ]), {
-      sub: `达标需连续保持 ${fmtDuration(pick(trainingConfig(), 'hold_sec'))}；目标按表现自适应（步长 ${fmtNum(pick(trainingConfig(), 'target_step'), 2)}，区间 ${fmtNum(pick(trainingConfig(), 'target_min'), 2)}–${fmtNum(pick(trainingConfig(), 'target_max'), 2)}）`,
+      sub: `达标需连续保持 ${fmtDuration(view.holdSec)}；目标按表现自适应（步长 ${fmtNum(pick(trainingConfig(), 'target_step'), 2)}，区间 ${fmtNum(pick(trainingConfig(), 'target_min'), 2)}–${fmtNum(pick(trainingConfig(), 'target_max'), 2)}）`,
     }));
   };
 
   const renderSegments = () => {
     segmentHost.textContent = '';
     if (!local.segments.length) {
-      segmentHost.append(card('训练分段', [empty('尚未收到 segment 事件（训练阶段开始后每段结束推送一次）。')]));
+      segmentHost.append(card('训练分段', [empty('训练阶段开始后，每段结束会显示统计结果。')]));
       return;
     }
     const rows = local.segments.map((segment) => ({
@@ -186,11 +196,13 @@ export function render(container, ctx) {
     const body = el('div');
     const chartHost = el('div');
     body.append(table([
-      { title: '段', render: (row) => fmtInt(pick(row, 'seq')) },
+      { title: '段', render: (row) => fmtInt(Number(pick(row, 'seq', 0)) + 1) },
       { title: '目标（前→后）', render: (row) => `${fmtNum(row.target, 3)} → ${fmtNum(row.target_after, 3)}` },
       { title: '保持（前→后）', render: (row) => `${fmtDuration(row.hold_sec)} → ${fmtDuration(row.hold_after)}` },
       { title: '均值', align: 'right', render: (row) => fmtNum(pick(row, '__stats.mean'), 3) },
       { title: '达标占比', align: 'right', render: (row) => fmtPercent(pick(row, '__stats.on_target_ratio')) },
+      { title: '最长保持', render: (row) => fmtDuration(pick(row, '__stats.max_hold_sec')) },
+      { title: '连续达标', render: (row) => typeof pick(row, '__stats.achieved') === 'boolean' ? (row.__stats.achieved ? '达标' : '未达标') : DASH },
       { title: '波动', align: 'right', render: (row) => fmtNum(pick(row, '__stats.volatility'), 3) },
       { title: '有效点', align: 'right', render: (row) => fmtInt(pick(row, '__stats.n')) },
       { title: '排除窗', align: 'right', render: (row) => fmtInt(row.excluded_windows) },
@@ -199,7 +211,7 @@ export function render(container, ctx) {
     body.append(chartHost);
     segmentHost.append(card('训练分段', body, { sub: '统计口径与训练闭环同源，排除窗不计入统计' }));
     drawBarChart(chartHost, rows.map((row, index) => ({
-      label: `第${fmtInt(row.seq ?? index)}段`,
+      label: `第${fmtInt(Number(row.seq ?? index) + 1)}段`,
       value: typeof pick(row, '__stats.on_target_ratio') === 'number' ? pick(row, '__stats.on_target_ratio') : null,
     })).filter((row) => typeof row.value === 'number'), { max: 1, percent: true, height: 180, label: '各段达标占比柱状图' });
   };
@@ -256,9 +268,12 @@ export function render(container, ctx) {
       }
       case 'feedback': {
         local.segment = payload.segment;
+        local.currentHold = payload.usable === false ? 0 : payload.current_hold_sec ?? null;
+        local.maxHold = payload.max_hold_sec ?? null;
+        local.holdSec = payload.hold_sec ?? local.holdSec;
         local.target = typeof payload.target === 'number' ? payload.target : local.target;
         local.score = typeof payload.score === 'number' ? payload.score : null;
-        local.onTarget = payload.usable === false ? null : Boolean(payload.on_target);
+        local.onTarget = payload.usable === false ? null : typeof payload.achieved === 'boolean' ? payload.achieved : null;
         renderGauge();
         renderStatus();
         break;
@@ -321,6 +336,9 @@ export function render(container, ctx) {
       }));
       if (segments.length) local.segments = segments;
       local.summary = data.summary || null;
+      if (local.summary) {
+        local.score = local.target = local.onTarget = local.currentHold = local.maxHold = local.segment = null;
+      }
       renderSegments();
       renderBaseline(data.summary || {});
       // 会话结束后 feedback 停推，仪表/达标状态必须由落库数据兜底刷新（否则整卡都是 —）

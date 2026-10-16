@@ -319,7 +319,7 @@ def profiles_as_list() -> list[dict]:
         # 短协议下会缩到 ~208s，直接用名义值会少报节省。
         total = sum(phase.duration_sec for phase in active if phase.key != "sart")
         total += float(item.get("sart_sec_estimate") or 0.0)
-        total -= float(item["pvt_duration_sec"])          # phases 里 PVT 名义 180s，按档案值算
+        total -= PHASE_BY_KEY["pvt"].duration_sec
         total += float(item["pvt_duration_sec"])
         rows.append({
             **{name: value for name, value in item.items() if name != "phases"},

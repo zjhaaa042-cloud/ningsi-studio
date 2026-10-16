@@ -161,7 +161,7 @@ export const api = {
   subjectSessions: (publicId, params) => get(`/api/subjects/${encodeURIComponent(publicId)}/sessions`, params),
 
   /* -------------------------------------------------------------- 会话 */
-  createSession: (body) => post('/api/sessions', body),
+  createSession: (body) => request('POST', '/api/sessions', { body, timeout: 30000 }),
   listSessions: (params) => get('/api/sessions', params),
   getSession: (uuid) => get(`/api/sessions/${uuid}`),
   cancelSession: (uuid) => request('DELETE', `/api/sessions/${uuid}`),

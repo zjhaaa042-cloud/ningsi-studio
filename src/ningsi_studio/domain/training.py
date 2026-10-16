@@ -5,7 +5,7 @@ from __future__ import annotations
 from ningsi import config
 from ningsi.signal.indicators import compute_indicators
 from ningsi.signal.window import analyze_window
-from ningsi.training.neurofeedback import NeurofeedbackSession, initial_target
+from ningsi.training.neurofeedback import NeurofeedbackSession, Segment, initial_target
 
 
 class StudioTraining:
@@ -44,6 +44,14 @@ class StudioTraining:
             return
         self.samples.append((float(t_sec), float(score)))
 
+    def feedback_status(self) -> dict:
+        stats = Segment(self.segment_index + 1, self.plan["segment_sec"],
+                        self.target, self.inner.hold_sec, self.samples).stats()
+        return {"hold_sec": self.inner.hold_sec,
+                "current_hold_sec": stats["current_hold_sec"],
+                "max_hold_sec": stats["max_hold_sec"],
+                "achieved": stats["achieved"]}
+
     # ---------------------------------------------------------------- 分段
     def close_segment(self) -> dict:
         target_before = round(float(self.inner.target), 4)
@@ -74,10 +82,11 @@ class StudioTraining:
         self.excluded = 0
         return payload
 
-    def summary(self, window_engine, seconds_after: float = 30.0) -> dict:
+    def summary(self, window_engine, seconds_after: float = 30.0, *, baseline_after=None) -> dict:
         """训练后按同口径再采一小段基线，给出训练前后对比。"""
-        _, steps = window_engine.build_baseline("rest", seconds_after)
-        baseline_after = window_engine.baseline
+        if baseline_after is None:
+            window_engine.build_baseline("rest", seconds_after)
+            baseline_after = window_engine.baseline
         return self.inner.summary(self.baseline_before, baseline_after)
 
 

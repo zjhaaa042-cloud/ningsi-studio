@@ -4,7 +4,7 @@
  * 数据来源：
  * - GET  /api/subjects、POST /api/subjects、PATCH /api/subjects/{public_id}
  * - GET  /api/subjects/{public_id}/sessions
- * - POST /api/sessions（time_scale 默认 0.05 快速演示，训练模式 quick/full）
+ * - 开始检测统一进入三步向导，避免不同页面的设备与节奏选项不一致。
  */
 
 import { api } from '../api.js';
@@ -17,7 +17,6 @@ import {
 const AGE_BANDS = ['16-17', '18-25', '26-35', '36-45', '46-55', '56-65', '65+'];
 const SEX_OPTIONS = ['女', '男', '不便告知'];
 const HANDEDNESS_OPTIONS = ['右', '左', '双利手'];
-const DEVICE_LIST_ID = 'session-device-options';
 
 /** 视图内状态：切换被试/刷新时保留（视图卸载即丢弃）。 */
 const view = { publicId: null, query: '', editId: null };
@@ -28,37 +27,6 @@ function selectInput(id, options, { placeholder = '请选择', value = '' } = {}
   for (const option of options) node.append(el('option', { value: option, text: option }));
   node.value = value;
   return node;
-}
-
-/** 把 `GET /api/devices` 的探测结果灌进设备输入框的下拉候选（datalist）。 */
-function fillDeviceOptions(datalist, sources) {
-  clear(datalist);
-  for (const item of list(sources)) {
-    const key = pick(item, 'key');
-    // 不支持的流类型只有占位 key（unsupported:xxx），选了也没法用，不列出来
-    if (!key || String(key).startsWith('unsupported:')) continue;
-    const note = pick(item, 'note');
-    datalist.append(el('option', { value: String(key), label: note ? String(note) : String(key) }));
-  }
-}
-
-/**
- * 设备 / 数据源输入框：`<input list=…>` + 由 `GET /api/devices` 填充的 `<datalist>`。
- *
- * 用 datalist 而不是 `<select>`：真实流名称是现场才知道的字符串，select 里没有匹配项时
- * 赋值会被浏览器静默丢弃（值仍是旧选项），而输入框永远能手填；datalist 只是"探测到的候选"。
- *
- * 2026-10-07 起**缺省值不再写死 `sim-bsense`**：探测到实时流就填真实流，
- * 没有信号就留空（提交时后端会 409 并给出接入指引）——仿真源必须由人显式选择。
- */
-function deviceField() {
-  const input = el('input', {
-    id: 'session-device', type: 'text', value: '',
-    placeholder: '例如 lsl:BioMultiLite EEG-xxxx（留空=自动选当前检测到的实时源）',
-    attrs: { list: DEVICE_LIST_ID },
-  });
-  const datalist = el('datalist', { id: DEVICE_LIST_ID });
-  return { input, datalist };
 }
 
 function renderSubjectForm(ctx, onCreated) {
@@ -236,126 +204,20 @@ function renderSubjectEdit(ctx, subject, publicId) {
 }
 
 function renderNewSessionPanel(ctx, publicId, options = {}) {
-  // 时间倍率选项显式列出，避免 select 索引与文案错位
-  const scaleSelect = selectInput('session-time-scale', [], { placeholder: '' });
-  for (const [value, text] of [
-    ['0.05', '0.05（快速演示，20 倍速，后端自动作答）'],
-    ['0.2', '0.2（半自动，仍与真实节奏不同）'],
-    ['0.5', '0.5（慢速）'],
-    ['1.0', '1.0（真实节奏，每窗 2 秒）'],
-  ]) {
-    scaleSelect.append(el('option', { value, text }));
+  const subjects = list(options.subjects);
+  const select = el('select', { id: 'session-subject' });
+  for (const subject of subjects) {
+    const id = pick(subject, 'public_id', '');
+    select.append(el('option', { value: id, text: `sub-${id}${subject.label ? `（${subject.label}）` : ''}` }));
   }
-  scaleSelect.value = '0.05';
-  const modeSelect = selectInput('session-mode', [], { placeholder: '' });
-  for (const [value, text] of [
-    ['quick', 'quick（2 段训练）'],
-    ['full', 'full（4 段训练）'],
-  ]) {
-    modeSelect.append(el('option', { value, text }));
-  }
-  modeSelect.value = 'quick';
-  const { input: deviceInput, datalist: deviceOptions } = deviceField();
-  const deviceHint = el('span', { class: 'muted', text: '正在探测可用数据源…' });
-  // 探测失败（例如未装 pylsl）不影响填表：输入框仍可手填 lsl:<流名称>
-  api.devices(1.0).then((response) => {
-    if (ctx.signal.aborted) return;
-    const sources = list(pick(response.data, 'sources', []));
-    fillDeviceOptions(deviceOptions, sources);
-    const real = sources.filter((item) => pick(item, 'real') && !String(pick(item, 'key', '')).startsWith('unsupported:'));
-    const realDevice = real.find((item) => !pick(item, 'simulated', false)) || real[0] || null;
-    // 缺省跟硬件走：有实时流就预填（用户可以改）；没有就留空，让提交时的 409 提示去指导接线
-    if (realDevice && !deviceInput.value.trim()) deviceInput.value = String(pick(realDevice, 'key', ''));
-    const hardwareNote = pick(sources.find((item) => pick(item, 'hardware_note', null)) || {}, 'hardware_note', null);
-    deviceHint.textContent = realDevice
-      ? `已探测到 ${real.length} 个实时数据源（已预填 ${pick(realDevice, 'key')}，下拉可选；也可手填 lsl:<流名称>）`
-        + (pick(realDevice, 'simulated', false) ? '；注意它是内置仿真流，不是真实设备' : '')
-      : (hardwareNote || '未检测到脑电信号：请先启动采集端（如 BioMultiLite / BSense-R）；'
-        + '仅演示/自测时可显式填 sim-bsense（界面与报告会标注为仿真）');
-  }).catch((error) => {
-    if (ctx.signal.aborted) return;
-    deviceHint.textContent = `数据源探测失败（${describeError(error)}）；接入设备后可手填 lsl:<流名称>，`
-      + '仅演示/自测时可显式填 sim-bsense';
-  });
-
-  const labelInput = el('input', { id: 'session-label', type: 'text', placeholder: '例如：第一次训练' });
-  const submit = button('开始新会话', null, { primary: true });
-
-  // 列表态需要先挑被试；详情态被试已确定，直接显示编号
-  const subjectOptions = list(options.subjects);
-  let subjectSelect = null;
-  if (subjectOptions.length) {
-    subjectSelect = selectInput('session-subject', [], { placeholder: '' });
-    for (const item of subjectOptions) {
-      const id = pick(item, 'public_id');
-      if (!id) continue;
-      const label = pick(item, 'label');
-      subjectSelect.append(el('option', {
-        value: id,
-        text: `sub-${id}${label ? `（${label}）` : ''}`,
-      }));
-    }
-    subjectSelect.value = publicId || pick(subjectOptions[0], 'public_id') || '';
-  }
-  const who = subjectSelect
-    ? field('被试', subjectSelect, '选好要跑这次会话的被试')
-    : el('p', { class: 'muted', text: `被试：sub-${publicId || DASH}` });
-
-  submit.addEventListener('click', async () => {
-    const participant = subjectSelect
-      ? (subjectSelect.value || '').trim()
-      : (publicId || '').trim();
-    if (!participant) {
-      toast('请先选择被试（若还没有被试，先用上方表单创建一个）', 'error');
-      return;
-    }
-    submit.disabled = true;
-    submit.textContent = '启动中…';
-    try {
-      const response = await api.createSession({
-        participant,
-        // 空值交给后端解析（=自动选当前检测到的实时源，没有信号就 409），
-        // **不再**在前端补一个 sim-bsense：那正是"静默使用仿真"的来源
-        device: deviceInput.value.trim() || null,
-        time_scale: Number(scaleSelect.value),
-        training_mode: modeSelect.value,
-        label: labelInput.value.trim() || null,
-        create_subject: true,
-      });
-      const uuid = pick(response.data, 'session.uuid');
-      ctx.store.setState({
-        currentSession: pick(response.data, 'session', null),
-        phases: list(pick(response.data, 'phases', [])),
-        sessionRuntime: pick(response.data, 'runtime', null),
-      });
-      toast('会话已启动，正在进入八阶段流程', 'info');
-      ctx.navigate(`#/flow?session=${uuid}`);
-    } catch (error) {
-      toast(describeError(error));
-    } finally {
-      submit.disabled = false;
-      submit.textContent = '开始新会话';
-    }
-  });
-
-  return card('开始新会话', el('div', {}, [
-    el('p', { class: 'muted', text: 'time_scale < 0.2 时后端会生成确定性作答（量表/ SART / PVT 无需前端交互），用于演示与自动测试；1.0 为真实节奏。' }),
-    el('div', { class: 'form-grid' }, [
-      who,
-      field('时间倍率 time_scale', scaleSelect),
-      field('训练模式', modeSelect),
-      // 手写 field 结构而不是用 field()：设备提示要随 GET /api/devices 的结果异步更新，
-      // 而 field() 的 hint 只接受字符串（会在建节点时固化）。
-      el('div', { class: 'field' }, [
-        el('label', { class: 'field__label', for: 'session-device', text: '设备 / 数据源' }),
-        deviceInput,
-        deviceOptions,
-        deviceHint,
-      ]),
-      field('会话标签', labelInput),
-    ]),
-    el('div', { class: 'row row--end', style: 'margin-top:12px' }, [submit]),
-  ]), { sub: '提交后会直接跳到“会话流程”，约 1–2 分钟跑完（快速演示模式）' });
+  return card('开始一次检测', el('div', {}, [
+    el('p', { class: 'muted', text: '进入检测向导，确认设备信号、检测协议和训练时长。' }),
+    publicId ? el('p', { text: `本次被试 sub-${publicId}` }) : field('被试', select),
+    button('前往检测准备', () => {
+      const id = publicId || select.value;
+      ctx.navigate(id ? `#/start?participant=${encodeURIComponent(id)}` : '#/start');
+    }, { primary: true }),
+  ]));
 }
 
 async function renderSubjectDetail(host, ctx) {

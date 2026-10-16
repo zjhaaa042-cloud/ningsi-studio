@@ -187,16 +187,19 @@ def _lsl_check(args) -> int:
     if not found:
         print("  提示         : 先用内置仿真流验证链路："
               "python -m ningsi_studio simulate-outlet --duration 60")
-        return 0
+        return 1 if args.device else 0
 
     if args.device:
         name = args.device.split(":", 1)[1] if args.device.startswith("lsl:") else args.device
         print(f"  连接测试     : {name}（接收 {args.seconds:.0f} 秒）")
-        manager = lsl_module.LiveStreamManager(buffer_seconds=30.0)
+        manager = lsl_module.LiveStreamManager(buffer_seconds=30.0, wanted_name=name)
         manager.start()
         try:
             ready = manager.wait_for("eeg", timeout=float(args.timeout) + 5.0, min_samples=1)
             print(f"  是否就绪     : {ready}")
+            if not ready:
+                print("  结论         : 指定设备未就绪，未验证采集链路")
+                return 1
             if ready:
                 import time as _time
                 _time.sleep(float(args.seconds))
@@ -211,6 +214,9 @@ def _lsl_check(args) -> int:
                 errors = manager.errors()
                 if errors:
                     print(f"  错误         : {errors}")
+                if not stats.get("live"):
+                    print("  结论         : 指定设备已停止推流或掉线")
+                    return 1
         finally:
             manager.stop()
     print("  结论         : LSL 链路可用")

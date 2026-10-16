@@ -1,6 +1,5 @@
-/* 凝思 Studio 静态前端样式。
-   约束：不使用图片/字体外链；不使用状态色（配色只来自接口给的 heatmap 色值）；
-   深浅色通过 prefers-color-scheme 适配，变量集中在此处维护。 */
+/* 凝思 Studio：便携脑电专注力训练工作台。
+   品牌色用于导航与操作，数据分档颜色仍由接口定义；不使用外链字体和图片。 */
 
 :root {
   --bg: #f4f5f7;
@@ -18,19 +17,7 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16181d;
-    --surface: #1e2128;
-    --surface-2: #262a33;
-    --line: #333844;
-    --line-strong: #454b59;
-    --text: #e6e8ec;
-    --text-2: #a8aeba;
-    --text-3: #7c828d;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 2px 8px rgba(0, 0, 0, .3);
-  }
-}
+
 
 * { box-sizing: border-box; }
 
@@ -186,8 +173,8 @@ a { color: inherit; }
 .card__body { min-width: 0; }
 
 .grid { display: grid; gap: var(--gap); }
-.grid--2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
-.grid--3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.grid--2 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+.grid--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .grid--kpi { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 
 .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -914,6 +901,7 @@ button.btn--sm { padding: 4px 9px; font-size: 12px; }
 
 @media (max-width: 720px) {
   .layout { flex-direction: column; }
+  .view { width: 100%; }
   .sidenav { position: static; width: 100%; flex: none; min-height: 0; border-right: none; border-bottom: 1px solid var(--line); }
   .sidenav__list { flex-direction: row; flex-wrap: wrap; }
   .topbar__session { margin-left: 0; width: 100%; }
@@ -982,4 +970,186 @@ table.data td a:focus-visible,
 .path-wrap {
   overflow-wrap: anywhere;
   word-break: break-all;
+}
+
+
+/* 前端体验第二轮：任务优先、紧凑反馈、渐进展开。 */
+.eyebrow { display:block; color:var(--text-2); font-size:11px; letter-spacing:1.2px; margin-bottom:6px; }
+.wizard { max-width:1060px; margin:0 auto; }
+.wizard h1 { margin:0; font-size:26px; }
+.wizard__steps { margin:20px 0; gap:10px; }
+button.wizard__step { text-align:left; font:inherit; color:var(--text-2); cursor:pointer; border:1px solid var(--line); background:var(--surface); padding:14px; border-radius:var(--radius); }
+button.wizard__step:disabled { opacity:1; cursor:default; }
+button.wizard__step--now { color:var(--text); border-color:var(--text); background:var(--surface-2); }
+button.wizard__step--done:hover { border-color:var(--text-2); }
+.wizard__foot { position:sticky; bottom:0; z-index:10; margin:18px -1px 0; padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
+.setup-summary { padding:20px; border:1px solid var(--line-strong); border-radius:var(--radius); background:var(--surface-2); margin-bottom:8px; }
+.setup-summary h2 { margin:0 0 14px; font-size:21px; }
+.setup-summary__facts { display:flex; flex-wrap:wrap; gap:8px; }
+.setup-summary__facts > span { padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:var(--surface); font-size:12px; }
+.result-details { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; margin:12px 0; min-width:0; }
+.result-details > summary { font-weight:600; cursor:pointer; padding:4px 0; }
+.result-details[open] > summary { margin-bottom:14px; }
+.result-details > .card { margin-bottom:0; box-shadow:none; }
+.load-warning { border:1px solid var(--line-strong); background:var(--surface-2); padding:12px 16px; border-radius:var(--radius); }
+.training-overview { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.25fr); gap:16px; align-items:start; }
+.training-overview > * { min-width:0; }
+.training-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px 18px; }
+.training-stats > div { min-width:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); }
+.training-stats p { margin:0; }
+.training-stats .kpi__value { font-size:24px; margin-top:7px; }
+.training-stats p:not(.muted) { margin-top:7px; }
+.training-stats .training-hold { grid-column:1/-1; }
+.training-hold progress { display:block; width:100%; height:9px; margin-top:10px; accent-color:var(--text-2); }
+.training-page .card__sub { max-width:65ch; line-height:1.7; }
+.report-summary h2 { font-size:24px; line-height:1.5; margin:10px 0 14px; }
+.summary-note { padding:10px 12px; border-left:3px solid var(--line-strong); background:var(--surface-2); }
+.completed-details { background:var(--surface); }
+@media (max-width:950px) { .training-overview { grid-template-columns:minmax(0,1fr); } }
+@media (max-width:520px) {
+  .wizard__step-hint { display:none; }
+  button.wizard__step { padding:10px 8px; }
+  .wizard__steps { gap:6px; }
+  .setup-summary { padding:16px; }
+  .training-stats { gap:10px; }
+  .training-stats > div { padding:10px; }
+  .training-stats .kpi__value { font-size:21px; }
+  .wizard__foot { padding:12px; }
+}
+
+
+/* 第三轮：收起移动导航，检测时突出当前阶段与实时反馈。 */
+.nav-toggle { display:none; }
+.flow--stage .flow-phase-hidden { display:none; }
+.flow-feedback { display:grid; gap:12px; }
+.feedback-score { font-size:32px; line-height:1.2; }
+.flow-feedback progress { width:100%; height:14px; accent-color:var(--text-2); }
+.flow-feedback p { margin:0; line-height:1.7; }
+@media (max-width:720px) {
+  .nav-toggle { display:flex; width:100%; align-items:center; justify-content:space-between; padding:10px 12px; color:var(--text); background:var(--surface-2); border:1px solid var(--line); border-radius:8px; font:inherit; cursor:pointer; }
+  .nav-toggle::after { content:'展开菜单 ▾'; color:var(--text-2); font-size:12px; }
+  .nav-toggle[aria-expanded="true"]::after { content:'收起菜单 ▴'; }
+  .sidenav .sidenav__list, .sidenav .sidenav__foot { display:none; }
+  .sidenav--open .sidenav__list { display:flex; margin-top:10px; }
+  .sidenav--open .sidenav__foot { display:block; }
+  .sidenav__list > li { flex:1 1 40%; }
+  .sidenav { padding:10px 16px; }
+}
+
+
+/* ===== 凝思：研究与训练工作台 / 视觉版本 5 ===== */
+:root {
+  color-scheme:light;
+  --bg:#f2f1ed; --surface:#fffefa; --surface-2:#f3f3ef;
+  --line:#dedfd8; --line-strong:#b9bfb9;
+  --text:#28302f; --text-2:#505c59; --text-3:#64706b;
+  --accent:#3b5968; --accent-hover:#294451;
+  --radius:6px; --radius-sm:4px; --gap:20px;
+  --shadow:none;
+}
+body { background:var(--bg); font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif; }
+.topbar { min-height:64px; padding:12px 24px; gap:24px; background:var(--surface); box-shadow:none; }
+.topbar__brand { gap:11px; }
+.topbar__logo { width:33px; height:33px; border-radius:3px; background:#354b52; color:#fffefa; font:600 14px/1 var(--mono); letter-spacing:-1px; }
+.brand-stack { display:flex; flex-direction:column; line-height:1.3; }
+.topbar__title { font-size:16px; font-weight:650; letter-spacing:.3px; }
+.brand-caption { font:9px/1.4 var(--mono); letter-spacing:.5px; color:var(--text-3); margin-top:3px; }
+.topbar__meta { gap:6px; }
+.badge { padding:3px 8px; font-size:11px; background:transparent; border-color:var(--line); border-radius:3px; }
+#source-badge[data-kind="sim"] { background:#f5eddd; border-color:#d9c9a9; color:#73592b; }
+#source-badge[data-kind="lsl"] { background:#eaf0eb; border-color:#c5d2c7; color:#3c5e44; }
+.layout { min-height:calc(100% - 64px); }
+.sidenav { top:64px; width:194px; flex-basis:194px; padding:24px 12px; min-height:calc(100vh - 64px); background:#eaece6; border-right:1px solid #d7dbd3; }
+.sidenav__list { gap:3px; }
+.sidenav__link { justify-content:flex-start; gap:11px; min-height:42px; padding:10px 12px; border:1px solid transparent; border-radius:3px; font-size:13px; color:#505e59; }
+.sidenav__link:hover { color:var(--text); background:#f4f4ee; }
+.sidenav__link[aria-current="page"] { color:#253d47; background:#fffefa; border:1px solid #d5dcd5; border-left:3px solid #3b5968; padding-left:10px; font-weight:650; }
+.nav-icon { width:17px; height:17px; flex:none; opacity:.8; }
+.sidenav__foot { border-top:1px solid #d0d6cc; padding:16px 4px 0; }
+.sidenav__foot .muted { font-size:11px; color:#5f6d65; line-height:1.9; }
+.sidenav__foot .btn { background:transparent; }
+.view { padding:26px 30px 40px; }
+h1 { font-size:25px; font-weight:650; letter-spacing:-.5px; }
+h2 { font-size:19px; }
+.card { padding:20px 22px; box-shadow:none; border-color:#dcded6; border-radius:6px; }
+.card__head { margin-bottom:16px; }
+.card__title { font-size:15px; font-weight:650; }
+.card__title::before { content:none; }
+.card__sub { color:#68736b; line-height:1.8; }
+button.btn { min-height:36px; padding:7px 13px; border-radius:4px; border-color:#bcc5bd; box-shadow:none; font-size:13px; font-weight:550; }
+button.btn--primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button.btn--primary:hover:not(:disabled) { background:var(--accent-hover); opacity:1; }
+button.btn--sm { min-height:30px; padding:4px 10px; font-size:12px; }
+input:not([type="checkbox"]):not([type="radio"]),select,textarea { border-radius:3px; border-color:#c6cec4; background:#fffefa; }
+input:focus,select:focus,textarea:focus { border-color:var(--accent); outline-color:var(--accent); }
+input[type="checkbox"],input[type="radio"],progress,.training-hold progress,.flow-feedback progress { accent-color:var(--accent); }
+.progress { height:7px; background:#e6e9e1; border:0; }
+.progress__bar,.bar__fill { background:var(--accent); }
+.eyebrow { color:#68756d; font:11px/1.6 var(--mono); letter-spacing:1px; font-weight:500; }
+.wizard { max-width:1120px; }
+.focus-hero { display:flex; align-items:flex-end; justify-content:space-between; gap:30px; padding:6px 0 24px; border:0; border-bottom:1px solid #bdc7be; border-radius:0; background:none; }
+.focus-hero h1 { font-size:31px; line-height:1.35; margin:9px 0 10px; font-weight:650; }
+.focus-hero__intro { max-width:49ch; color:#5c6960; font-size:13px; line-height:1.9; margin:0; }
+.focus-hero__side { flex:0 0 245px; padding-left:23px; border-left:1px solid #cdd4ca; }
+.focus-hero__side .eyebrow { font-size:10px; margin-bottom:9px; }
+.protocol-outline { margin:0 0 14px; padding:0; list-style:none; display:flex; flex-direction:column; gap:5px; font-size:12px; color:#52635a; }
+.protocol-outline span { margin-right:12px; color:#7d8a81; font-family:var(--mono); }
+.wizard__steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0; margin:22px 0; border-bottom:1px solid #cbd2c8; }
+button.wizard__step { display:flex; align-items:center; padding:11px 10px 13px; border:0; border-bottom:2px solid transparent; border-radius:0; background:none; font-size:12px; }
+button.wizard__step--now { background:none; color:#2b4754; border-bottom-color:#3b5968; }
+button.wizard__step--done { border-style:solid; color:#51685b; }
+button.wizard__step--done:hover { background:#e9ede6; }
+.wizard__step-no { font:12px/1.4 var(--mono); border:0; background:transparent; color:#67796c; padding-right:3px; }
+.wizard__step-title { font-size:13px; font-weight:650; }
+.wizard__step-hint { font-size:11px; color:#69796b; }
+.pick,.choice { border-radius:4px; box-shadow:none; background:#fffefa; padding:13px 16px; }
+.pick--on,.choice--on { background:#edf1e9; border-color:#7e9383; color:var(--text); box-shadow:inset 3px 0 #728b78; }
+.pick:hover,.choice:hover { border-color:#8e9d91; }
+.pick__title,.choice__title { color:#334239; }
+.pick__note,.choice__note { color:#647366; }
+.wizard__foot { background:#fffefa; border-radius:4px; border-color:#cbd3c6; padding:14px 18px; box-shadow:0 -2px 8px #28302f04; }
+.setup-summary { background:#edf0e9; border-color:#c9d4c4; border-radius:4px; padding:20px; }
+.setup-summary__facts > span { border-radius:3px; background:#f8f9f4; border-color:#d4dccd; }
+.flow-taskbar { background:#e8ede6; border-radius:4px; border-color:#cad4c5; padding:11px 14px; }
+.flow-taskbar strong { color:#344b40; }
+.flow-feedback { gap:14px; }
+.feedback-score { font-size:38px; color:#344f5b; }
+.flow-feedback progress { height:12px; }
+.training-overview { grid-template-columns:minmax(0,1fr) minmax(0,1.2fr); }
+.training-stats { gap:0; border-top:1px solid #dce1d5; }
+.training-stats > div { padding:14px 12px; background:none; border:0; border-bottom:1px solid #dce1d5; border-radius:0; }
+.training-stats > div:nth-child(odd) { border-right:1px solid #dce1d5; }
+.training-stats .kpi__value { color:#344f5b; font-size:26px; font-weight:600; }
+.training-stats .training-hold { background:#edf1e8; border-right:0; margin-top:12px; padding:14px; }
+.chart--gauge .chart__label { fill:#344f5b; font:650 36px var(--mono); }
+.chart--gauge .chart__tick { font-size:11px; }
+.report-summary { padding:3px 0; }
+.report-summary h2 { font-size:23px; line-height:1.65; color:#34463e; margin:12px 0; max-width:42ch; }
+.summary-note { border-left:2px solid #889d84; background:#eef2e8; color:#4c634a; padding:10px 12px; border-radius:0; }
+.result-details { border-radius:3px; border-color:#d3dbce; background:#f8f9f3; }
+.result-details > summary { color:#4d6253; }
+table.data th { background:#edf0e8; color:#52644f; font-size:11px; font-weight:650; }
+table.data td { border-color:#e1e5d9; font-size:12px; }
+table.data tbody tr:hover { background:#f2f5ec; }
+.kpi__value { color:#344f5b; }
+@media (max-width:1100px) { .view { padding:22px; } .topbar { gap:12px; } .wizard__step-hint { display:none; } .focus-hero__side { flex-basis:210px; } }
+@media (max-width:950px) { .training-overview { grid-template-columns:minmax(0,1fr); } }
+@media (max-width:720px) {
+  .topbar { gap:8px; padding:10px 16px; }
+  .topbar__meta { width:100%; }
+  .topbar__session { min-width:0; }
+  .sidenav { width:100%; flex-basis:auto; min-height:0; padding:9px 16px; }
+  .nav-toggle { border:0; border-radius:0; background:none; padding:3px 0; color:#354b40; font-size:13px; }
+  .nav-toggle::after { color:#62775e; }
+  .view { padding:20px 16px 28px; }
+  .focus-hero { display:block; padding:0 0 20px; }
+  .focus-hero h1 { font-size:27px; }
+  .focus-hero__side { border:0; padding:0; margin-top:12px; }
+  .focus-hero__side .eyebrow,.protocol-outline { display:none; }
+  .card { padding:18px; }
+  .wizard__steps { margin:14px 0 18px; }
+  button.wizard__step { padding:9px 4px; gap:5px; }
+  .wizard__step-title { font-size:12px; }
+  .wizard__foot { padding:12px; }
+  .training-stats > div { padding:12px 8px; }
 }

@@ -71,6 +71,13 @@ function bandOf(score, bands) {
 export function render(container, ctx) {
   const uuid = ctx.params.get('session') || pick(ctx.store.state.currentSession, 'uuid', null);
   const actions = uuid ? [
+    button('NeuroFocus 监测台', () => {
+      const target = new URL('/neurofocus/', window.location.origin);
+      target.searchParams.set('session', uuid);
+      const token = new URLSearchParams(window.location.search).get('token');
+      if (token) target.searchParams.set('token', token);
+      window.location.assign(target.href);
+    }),
     button('流程视图', () => ctx.navigate(`#/flow?session=${uuid}`)),
     button('训练视图', () => ctx.navigate(`#/training?session=${uuid}`)),
     button('报告', () => ctx.navigate(`#/report?session=${uuid}`)),
@@ -103,6 +110,7 @@ export function render(container, ctx) {
   const local = {
     uuid,
     scores: {},
+    indicatorReason: '等待采集并建立个体基线',
     signal: null,
     cells: [],
     legend: [],
@@ -301,6 +309,9 @@ export function render(container, ctx) {
       return typeof value === 'number' ? value : null;
     };
     const body = el('div', { class: 'stack' });
+    if (local.indicatorReason && !Object.values(local.scores).some(value => Number.isFinite(value))) {
+      body.append(el('p', { class: 'muted', text: local.indicatorReason }));
+    }
     body.append(metricBar('专注度', summaryStat('focus'), {
       threshold: pick(alerts, 'low_focus.threshold'),
       thresholdLabel: `低专注阈值 ${fmtNum(pick(alerts, 'low_focus.threshold'), 2)}（持续 ${fmtSeconds(pick(alerts, 'low_focus.sustain_sec'), 0)}）`,
@@ -595,6 +606,21 @@ export function render(container, ctx) {
         break;
       }
       case 'window': {
+        const reasonLabels = {
+          baseline_invalid: '睁眼基线尚未建立或有效窗不足，请完成基线采集；若仍不合格，请检查电极后重新开始。',
+          baseline_pending: '正在采集个体基线，暂不显示评分。',
+          no_data: '未收到新鲜脑电数据，请检查设备连接和采集程序。',
+          signal_too_short: '脑电样本不足，正在等待缓冲。',
+          non_finite_signal: '脑电包含无效数值，请检查采集端。',
+          amplitude: '波幅过大，请保持静止并检查电极接触。',
+          flat_channel: '通道接近平直，请检查电极接触。',
+          channel_span: '通道差异过大，请检查电极。',
+          emg: '肌电干扰偏高，请放松面部和肩部。',
+          eog: '低频或眼动干扰偏高，请减少眨眼和头部运动。',
+        };
+        local.indicatorReason = Object.keys(payload.scores || {}).length ? ''
+          : (payload.reasons?.length ? payload.reasons : [payload.indicator_reason || 'baseline_pending'])
+            .map(reason => reasonLabels[reason] || `指标暂不可用：${reason}`).join(' ');
         local.windowIndex = Number(payload.index ?? local.windowIndex);
         const scores = payload.scores || {};
         for (const item of INDICATORS) {
