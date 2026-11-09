@@ -30,3 +30,5 @@ test('other session packets cannot enter the selected experiment',()=>{const f=f
 test('out-of-range backend scores remain null, never silently clamped',()=>{const f=fixture();f.window(1,{scores:{focus:82}});assert.equal(f.store.latest,null);assert.equal(f.store.meta.scoreInfo.calibrated,false);assert.equal(f.store.session.points[0].reason,'score_out_of_range');});
 test('unavailable poor-quality observations still expose poor quality',()=>{const f=fixture();f.window(1,{usable:false,scores:{},indicator_available:false,indicator_reason:'no_data'});assert.equal(f.store.state(),'poor');assert.equal(f.store.session.points[0].normalized,null);});
 test('invalid sequence numbers cannot poison gap/snapshot event ordering',()=>{const f=fixture();assert.equal(f.store.ingest({type:'focus_unavailable',timestampMs:100000,reason:'test',seq:Infinity}),false);f.window(1);assert.equal(f.store.state(),'valid');});
+
+test('fresh EEG connects transport while analysis windows are absent',()=>{const f=fixture();f.adapter.status('connecting');f.frame(1);assert.equal(f.store.connection,'connected');assert.equal(f.store.state(),'waiting');assert.equal(f.store.latest,null);});

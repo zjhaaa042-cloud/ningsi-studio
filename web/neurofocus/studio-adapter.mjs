@@ -56,7 +56,7 @@ export class StudioAdapter {
     return this.meta;
   }
   send(e) { this.emit({ ...e, seq: this.seq++ }); }
-  status(connection) { this.send({ type: 'device_status', timestampMs: this.clock(), connection }); }
+  status(connection) { this.connection = connection; this.send({ type: 'device_status', timestampMs: this.clock(), connection }); }
   metadata() { if (this.meta) { this.emit(structuredClone(this.meta)); this.onMetadata(this.meta); } }
   start() {
     if (!this.meta || this.timer !== null) return;
@@ -132,6 +132,7 @@ export class StudioAdapter {
       this.onNotice('波形帧缺少原始采样位置或单位，拒绝按原始 EEG 绘制'); return;
     }
     const labels = channels.map((c) => c.label);
+    if (['connecting', 'disconnected'].includes(this.connection)) this.status('connected');
     if (JSON.stringify(labels) !== JSON.stringify(this.meta.device.channels) || frame.srate !== this.meta.device.samplingRateHz) {
       this.meta.device.channels = labels; this.meta.device.samplingRateHz = frame.srate; this.meta.device.eegUnit = 'µV'; this.meta.capabilities.rawEEG = true; this.metadata();
     }

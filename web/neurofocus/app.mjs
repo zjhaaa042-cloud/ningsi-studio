@@ -224,7 +224,8 @@ function updateUI() {
   metrics.uiUpdates++;
   const score = valid ? Math.round(store.latest.normalized) : '--';
   $('score').textContent = String(score); $('focus-score').textContent = String(score);
-  $('connection').textContent = `${valid ? '●' : '○'} ${stateLabel}`;
+  const receivingEEG = mode === 'studio' && store.session?.status === 'recording' && store.eegReceivedAt !== null && now - store.eegReceivedAt <= store.staleMs;
+  $('connection').textContent = receivingEEG ? '● 已连接 · 正在接收 EEG' : `${valid ? '●' : '○'} ${stateLabel}`;
   for (const id of ['source-badge','data-source','footer-source']) $(id).textContent = sourceText(); $('connection').dataset.state = state;
   $('score-status').textContent = valid ? `${store.level || '观察中'} · 演示分级` : stateLabel;
   $('focus-state').textContent = valid ? `${store.level || '观察中'} · ${sourceText()}` : stateLabel;
